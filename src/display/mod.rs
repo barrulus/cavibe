@@ -1,0 +1,12 @@
+pub mod terminal;
+pub mod wallpaper;
+
+use clap::ValueEnum;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, ValueEnum)]
+pub enum DisplayMode {
+    #[default]
+    Terminal,
+    Wallpaper,
+}

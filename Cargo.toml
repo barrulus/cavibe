@@ -1,0 +1,55 @@
+[package]
+name = "cavibe"
+version = "0.1.0"
+edition = "2021"
+authors = ["barrulus"]
+description = "Audio visualizer with animated song display - terminal and wallpaper modes"
+license = "MIT"
+repository = "https://github.com/barrulus/cavibe"
+keywords = ["audio", "visualizer", "terminal", "cava", "music"]
+categories = ["multimedia", "visualization", "command-line-utilities"]
+
+[dependencies]
+# Terminal UI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# Audio capture and analysis
+cpal = "0.15"
+rustfft = "6.2"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Configuration
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+dirs = "5"
+
+# Color handling
+palette = "0.7"
+
+# MPRIS for song metadata (Linux)
+mpris = "2"
+
+# CLI arguments
+clap = { version = "4", features = ["derive"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[features]
+default = ["terminal"]
+terminal = []
+wallpaper = []
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

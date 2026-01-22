@@ -1,0 +1,21 @@
+# Rust
+/target/
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Nix
+/result
+.direnv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local config
+config.toml
