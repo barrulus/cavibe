@@ -1,13 +1,15 @@
+mod ascii_font;
 mod bars;
 mod styles;
 mod text;
 
 pub use bars::BarVisualizer;
-pub use styles::{VisualizerStyle, VISUALIZER_STYLES};
+pub use styles::VISUALIZER_STYLES;
 pub use text::TextAnimator;
 
 use crate::audio::AudioData;
 use crate::color::ColorScheme;
+use crate::config::{FontStyle, TextConfig, TextPosition, VisualizerConfig};
 use crate::metadata::TrackInfo;
 use ratatui::prelude::*;
 use std::sync::Arc;
@@ -20,6 +22,7 @@ pub trait Visualizer {
         area: Rect,
         audio: &AudioData,
         color_scheme: &ColorScheme,
+        config: &VisualizerConfig,
     );
 
     fn name(&self) -> &'static str;
@@ -29,15 +32,17 @@ pub trait Visualizer {
 pub struct VisualizerState {
     pub bar_visualizer: BarVisualizer,
     pub text_animator: TextAnimator,
+    pub visualizer_config: VisualizerConfig,
     pub current_style: usize,
     pub time: f32,
 }
 
 impl VisualizerState {
-    pub fn new(num_bars: usize) -> Self {
+    pub fn new(visualizer_config: VisualizerConfig, text_config: TextConfig) -> Self {
         Self {
-            bar_visualizer: BarVisualizer::new(num_bars),
-            text_animator: TextAnimator::new(),
+            bar_visualizer: BarVisualizer::new(visualizer_config.bars),
+            text_animator: TextAnimator::new(text_config),
+            visualizer_config,
             current_style: 0,
             time: 0.0,
         }
@@ -64,17 +69,60 @@ impl VisualizerState {
         track: &Arc<TrackInfo>,
         color_scheme: &ColorScheme,
     ) {
-        // Split area for visualizer and text
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(3)])
-            .split(area);
+        // Layout based on text position
+        let (bars_area, text_area) = self.calculate_layout(area);
 
         // Render bars
-        VISUALIZER_STYLES[self.current_style].render(frame, chunks[0], audio, color_scheme);
+        VISUALIZER_STYLES[self.current_style].render(
+            frame,
+            bars_area,
+            audio,
+            color_scheme,
+            &self.visualizer_config,
+        );
 
         // Render animated text
         self.text_animator
-            .render(frame, chunks[1], track, audio, color_scheme, self.time);
+            .render(frame, text_area, track, audio, color_scheme, self.time);
+    }
+
+    fn calculate_layout(&self, area: Rect) -> (Rect, Rect) {
+        // Calculate text height based on font style
+        let text_height = self.text_height();
+
+        match self.text_animator.position() {
+            TextPosition::Top => {
+                // Text at top, bars below
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(text_height), Constraint::Min(3)])
+                    .split(area);
+                (chunks[1], chunks[0])
+            }
+            TextPosition::Bottom => {
+                // Bars at top, text below (default)
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Min(3), Constraint::Length(text_height)])
+                    .split(area);
+                (chunks[0], chunks[1])
+            }
+            TextPosition::Center => {
+                // Text overlays center of bars
+                // Bars take full area, text gets center portion
+                let text_y = area.y + (area.height.saturating_sub(text_height)) / 2;
+                let text_area = Rect::new(area.x, text_y, area.width, text_height);
+                (area, text_area)
+            }
+        }
+    }
+
+    /// Get the text height based on font style
+    fn text_height(&self) -> u16 {
+        match self.text_animator.font_style() {
+            FontStyle::Figlet => ascii_font::FIGLET_HEIGHT + 1, // +1 for intensity bar
+            FontStyle::Ascii => ascii_font::ASCII_HEIGHT + 1,   // +1 for intensity bar
+            _ => 3, // Normal/Bold single-line text
+        }
     }
 }

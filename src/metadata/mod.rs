@@ -63,11 +63,14 @@ impl MetadataWatcher {
         let finder = PlayerFinder::new()?;
 
         // Find active player
-        let player = finder
-            .find_active()
-            .or_else(|_| finder.find_all()?.into_iter().next().ok_or_else(|| {
-                mpris::DBusError::Miscellaneous("No players found".into())
-            }))?;
+        let player = finder.find_active().or_else(|_| {
+            finder
+                .find_all()
+                .map_err(|_| mpris::DBusError::Miscellaneous("Failed to find players".into()))?
+                .into_iter()
+                .next()
+                .ok_or_else(|| mpris::DBusError::Miscellaneous("No players found".into()))
+        })?;
 
         let metadata = player.get_metadata()?;
         let playback_status = player.get_playback_status()?;

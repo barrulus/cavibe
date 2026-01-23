@@ -11,10 +11,11 @@ pub struct FrequencyAnalyzer {
     buffer: Vec<Complex<f32>>,
     window: Vec<f32>,
     previous_magnitudes: Vec<f32>,
+    sensitivity: f32,
 }
 
 impl FrequencyAnalyzer {
-    pub fn new(num_bars: usize, sample_rate: f32, smoothing: f32) -> Self {
+    pub fn new(num_bars: usize, sample_rate: f32, smoothing: f32, sensitivity: f32) -> Self {
         let fft_size = 2048; // Good balance of frequency resolution and responsiveness
         let planner = FftPlanner::new();
 
@@ -34,6 +35,7 @@ impl FrequencyAnalyzer {
             buffer: vec![Complex::new(0.0, 0.0); fft_size],
             window,
             previous_magnitudes: vec![0.0; num_bars],
+            sensitivity,
         }
     }
 
@@ -95,15 +97,17 @@ impl FrequencyAnalyzer {
 
         // Logarithmic frequency scaling for better visualization
         // Human hearing is logarithmic, so we want more bars for lower frequencies
-        let min_freq = 20.0; // Hz
-        let max_freq = 20000.0.min(self.sample_rate / 2.0); // Hz, capped at Nyquist
+        let min_freq = 50.0; // Hz - start a bit higher for better bass response
+        let max_freq = 10000.0_f32.min(self.sample_rate / 2.0); // Hz - cap lower for more activity
 
-        let mut bar_magnitudes = vec![0.0; self.num_bars];
+        // Calculate half the bars, then mirror for symmetric display (like cava)
+        let half_bars = self.num_bars / 2;
+        let mut half_magnitudes = vec![0.0; half_bars];
 
-        for bar in 0..self.num_bars {
+        for bar in 0..half_bars {
             // Calculate frequency range for this bar (logarithmic scale)
-            let bar_start = (bar as f32) / (self.num_bars as f32);
-            let bar_end = ((bar + 1) as f32) / (self.num_bars as f32);
+            let bar_start = (bar as f32) / (half_bars as f32);
+            let bar_end = ((bar + 1) as f32) / (half_bars as f32);
 
             let freq_start = min_freq * (max_freq / min_freq).powf(bar_start);
             let freq_end = min_freq * (max_freq / min_freq).powf(bar_end);
@@ -124,10 +128,18 @@ impl FrequencyAnalyzer {
             }
 
             let avg = sum / (bin_end - bin_start) as f32;
+            // Apply sensitivity scaling (base scale + user sensitivity multiplier)
+            half_magnitudes[bar] = (avg * 0.02 * self.sensitivity).min(1.0);
+        }
 
-            // Normalize and apply some scaling
-            // These values may need tuning based on input levels
-            bar_magnitudes[bar] = (avg * 0.01).min(1.0);
+        // Mirror: bass on edges, treble in middle
+        // Layout: [bass...treble | treble...bass]
+        let mut bar_magnitudes = vec![0.0; self.num_bars];
+        for i in 0..half_bars {
+            // Left side: bass to treble (reversed so bass is on left edge)
+            bar_magnitudes[half_bars - 1 - i] = half_magnitudes[i];
+            // Right side: treble to bass (normal order so bass is on right edge)
+            bar_magnitudes[half_bars + i] = half_magnitudes[i];
         }
 
         bar_magnitudes

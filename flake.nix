@@ -28,6 +28,7 @@
 
             # Audio libraries
             alsa-lib
+            alsa-plugins
             pipewire
             pulseaudio
 
@@ -50,6 +51,7 @@
           shellHook = ''
             export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath [
               pkgs.alsa-lib
+              pkgs.alsa-plugins
               pkgs.pulseaudio
               pkgs.pipewire
               pkgs.wayland
@@ -62,6 +64,8 @@
               pkgs.dbus
             ]}:$LD_LIBRARY_PATH"
             export PKG_CONFIG_PATH="${pkgs.alsa-lib.dev}/lib/pkgconfig:${pkgs.dbus.dev}/lib/pkgconfig:$PKG_CONFIG_PATH"
+            # Point ALSA to PipeWire plugins for loopback support
+            export ALSA_PLUGIN_DIR="${pkgs.alsa-plugins}/lib/alsa-lib"
             echo "Cavibe development environment loaded"
             echo "Run 'cargo build' to build the project"
             echo "Run 'cargo run' to start the visualizer"

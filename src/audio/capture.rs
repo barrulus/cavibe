@@ -1,7 +1,10 @@
 use anyhow::{anyhow, Result};
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Device, SampleFormat, Stream, StreamConfig};
+use libpulse_binding as pulse;
+use libpulse_simple_binding as psimple;
+use pulse::sample::{Format, Spec};
+use pulse::stream::Direction;
 use std::sync::Arc;
+use std::thread;
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
@@ -9,97 +12,123 @@ use super::fft::FrequencyAnalyzer;
 use super::AudioData;
 
 pub struct AudioCapture {
-    stream: Stream,
+    // Keep the thread handle to ensure it stays alive
+    _capture_thread: thread::JoinHandle<()>,
 }
 
 impl AudioCapture {
     pub fn new(
         num_bars: usize,
         smoothing: f32,
+        sensitivity: f32,
         sender: watch::Sender<Arc<AudioData>>,
     ) -> Result<Self> {
-        let host = cpal::default_host();
-
-        // Try to get default input device, fall back to output device for loopback
-        let device = host
-            .default_input_device()
-            .or_else(|| {
-                warn!("No input device found, trying output device for loopback");
-                host.default_output_device()
-            })
-            .ok_or_else(|| anyhow!("No audio device available"))?;
-
-        let device_name = device.name().unwrap_or_else(|_| "Unknown".to_string());
-        info!("Using audio device: {}", device_name);
-
-        let config = device.default_input_config()?;
-        debug!("Audio config: {:?}", config);
-
-        let sample_rate = config.sample_rate().0 as f32;
-        let channels = config.channels() as usize;
-
-        let stream = Self::build_stream(
-            &device,
-            &config.into(),
-            num_bars,
-            sample_rate,
-            channels,
-            smoothing,
-            sender,
-        )?;
-
-        stream.play()?;
-
-        Ok(Self { stream })
-    }
-
-    fn build_stream(
-        device: &Device,
-        config: &StreamConfig,
-        num_bars: usize,
-        sample_rate: f32,
-        channels: usize,
-        smoothing: f32,
-        sender: watch::Sender<Arc<AudioData>>,
-    ) -> Result<Stream> {
-        let mut analyzer = FrequencyAnalyzer::new(num_bars, sample_rate, smoothing);
-
-        let err_fn = |err| {
-            warn!("Audio stream error: {}", err);
+        // PulseAudio sample specification
+        let sample_rate = 44100;
+        let spec = Spec {
+            format: Format::F32le,
+            channels: 2,
+            rate: sample_rate,
         };
 
-        let stream = device.build_input_stream(
-            config,
-            move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                // Convert to mono if stereo
-                let mono: Vec<f32> = if channels > 1 {
-                    data.chunks(channels)
-                        .map(|chunk| chunk.iter().sum::<f32>() / channels as f32)
-                        .collect()
-                } else {
-                    data.to_vec()
-                };
+        if !spec.is_valid() {
+            return Err(anyhow!("Invalid PulseAudio sample spec"));
+        }
 
-                // Process through FFT
-                let audio_data = analyzer.process(&mono);
+        // Try to find a monitor source for loopback capture
+        let device = Self::find_monitor_source();
+        info!("Using audio device: {}", device.as_deref().unwrap_or("default"));
 
-                // Send to visualizer (ignore errors if receiver is dropped)
-                let _ = sender.send(Arc::new(audio_data));
-            },
-            err_fn,
-            None,
-        )?;
+        // Create PulseAudio simple connection for recording
+        let pulse = psimple::Simple::new(
+            None,                // Use default server
+            "cavibe",            // Application name
+            Direction::Record,   // Recording stream
+            device.as_deref(),   // Device name (None = default)
+            "audio-visualizer",  // Stream description
+            &spec,               // Sample format
+            None,                // Default channel map
+            None,                // Default buffering attributes
+        )
+        .map_err(|e| anyhow!("Failed to connect to PulseAudio: {:?}", e))?;
 
-        Ok(stream)
+        info!("Connected to PulseAudio, sensitivity: {}", sensitivity);
+
+        // Spawn capture thread
+        let capture_thread = thread::spawn(move || {
+            Self::capture_loop(pulse, num_bars, sample_rate as f32, smoothing, sensitivity, sender);
+        });
+
+        Ok(Self {
+            _capture_thread: capture_thread,
+        })
     }
 
-    pub fn pause(&self) -> Result<()> {
-        self.stream.pause()?;
-        Ok(())
+    fn capture_loop(
+        pulse: psimple::Simple,
+        num_bars: usize,
+        sample_rate: f32,
+        smoothing: f32,
+        sensitivity: f32,
+        sender: watch::Sender<Arc<AudioData>>,
+    ) {
+        let mut analyzer = FrequencyAnalyzer::new(num_bars, sample_rate, smoothing, sensitivity);
+
+        // Buffer for audio samples (stereo f32)
+        // Read enough samples for FFT processing (~46ms at 44100Hz)
+        let buffer_size = 2048 * 2; // stereo
+        let mut buffer = vec![0.0f32; buffer_size];
+
+        loop {
+            // Read audio data from PulseAudio
+            let byte_slice = unsafe {
+                std::slice::from_raw_parts_mut(
+                    buffer.as_mut_ptr() as *mut u8,
+                    buffer.len() * std::mem::size_of::<f32>(),
+                )
+            };
+
+            if let Err(e) = pulse.read(byte_slice) {
+                warn!("PulseAudio read error: {:?}", e);
+                continue;
+            }
+
+            // Convert stereo to mono
+            let mono: Vec<f32> = buffer
+                .chunks(2)
+                .map(|chunk| (chunk[0] + chunk[1]) / 2.0)
+                .collect();
+
+            // Process through FFT
+            let audio_data = analyzer.process(&mono);
+
+            // Send to visualizer (ignore errors if receiver is dropped)
+            if sender.send(Arc::new(audio_data)).is_err() {
+                debug!("Audio receiver dropped, stopping capture");
+                break;
+            }
+        }
     }
 
-    pub fn play(&self) -> Result<()> {
-        self.stream.play()?;
-        Ok(())
+    /// Find a monitor source for capturing system audio output
+    fn find_monitor_source() -> Option<String> {
+        // Try to get list of sources from PulseAudio
+        // For now, use a common default - the default output's monitor
+        // This works because PipeWire exposes monitors as "<sink-name>.monitor"
+
+        // Try common monitor source names
+        let candidates = [
+            "alsa_output.pci-0000_80_1f.3.analog-stereo.monitor",
+            "default_output.monitor",
+        ];
+
+        // For now, just use the first known working one
+        // A more robust solution would query PulseAudio for available sources
+        for candidate in &candidates {
+            info!("Trying monitor source: {}", candidate);
+            return Some(candidate.to_string());
+        }
+
+        None
     }
 }

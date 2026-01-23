@@ -15,7 +15,8 @@ ratatui = "0.29"
 crossterm = "0.28"
 
 # Audio capture and analysis
-cpal = "0.15"
+libpulse-binding = "2.28"
+libpulse-simple-binding = "2.28"
 rustfft = "6.2"
 
 # Async runtime
@@ -43,10 +44,13 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# X11 support for wallpaper mode
+x11rb = { version = "0.13", features = ["allow-unsafe-code"], optional = true }
+
 [features]
 default = ["terminal"]
 terminal = []
-wallpaper = []
+wallpaper = ["dep:x11rb"]
 
 [profile.release]
 lto = true
