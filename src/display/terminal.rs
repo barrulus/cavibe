@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::info;
 
-use crate::audio::{self, AudioData};
+use crate::audio;
 use crate::color::ColorScheme;
 use crate::config::Config;
 use crate::metadata::{self, TrackInfo};
@@ -38,16 +38,17 @@ pub async fn run(config: Config) -> Result<()> {
 
 async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, config: Config) -> Result<()> {
     // Start audio capture
-    let (audio_capture, audio_rx) = audio::create_audio_pipeline(
+    let (_audio_capture, audio_rx) = audio::create_audio_pipeline(
         config.visualizer.bars,
         config.audio.smoothing,
-    ).await?;
+        config.audio.sensitivity,
+    )?;
 
     // Start metadata watcher
     let metadata_rx = metadata::start_watcher();
 
     // Initialize visualizer state
-    let mut visualizer = VisualizerState::new(config.visualizer.bars);
+    let mut visualizer = VisualizerState::new(config.visualizer.clone(), config.text.clone());
     let mut color_scheme = config.visualizer.color_scheme;
 
     let mut last_frame = Instant::now();
@@ -81,9 +82,9 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, config: 
         terminal.draw(|frame| {
             let area = frame.area();
 
-            // Clear with black background
+            // Clear with transparent/reset background for terminal transparency support
             let block = ratatui::widgets::Block::default()
-                .style(Style::default().bg(Color::Black));
+                .style(Style::default().bg(Color::Reset));
             frame.render_widget(block, area);
 
             // Render visualizer
@@ -141,7 +142,7 @@ fn render_status(
     area: Rect,
     visualizer: &VisualizerState,
     color_scheme: &ColorScheme,
-    track: &Arc<TrackInfo>,
+    _track: &Arc<TrackInfo>,
 ) {
     // Status line at top
     let status = format!(
@@ -150,7 +151,7 @@ fn render_status(
         color_scheme
     );
 
-    let status_area = Rect::new(area.x, area.y, area.width, 1);
+    let _status_area = Rect::new(area.x, area.y, area.width, 1);
 
     for (i, ch) in status.chars().enumerate() {
         if i < area.width as usize {
