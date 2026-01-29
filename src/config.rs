@@ -108,10 +108,6 @@ pub struct RgbColor {
 }
 
 impl RgbColor {
-    pub fn new(r: u8, g: u8, b: u8) -> Self {
-        Self { r, g, b }
-    }
-
     /// Parse from hex string like "#FF0000" or "FF0000"
     pub fn from_hex(hex: &str) -> Option<Self> {
         let hex = hex.trim_start_matches('#');
@@ -122,10 +118,6 @@ impl RgbColor {
         let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
         let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
         Some(Self { r, g, b })
-    }
-
-    pub fn to_tuple(&self) -> (u8, u8, u8) {
-        (self.r, self.g, self.b)
     }
 }
 
@@ -177,12 +169,6 @@ impl Config {
         let content = std::fs::read_to_string(path)?;
         let config: Config = toml::from_str(&content)?;
         Ok(config)
-    }
-
-    pub fn save(&self, path: &Path) -> Result<()> {
-        let content = toml::to_string_pretty(self)?;
-        std::fs::write(path, content)?;
-        Ok(())
     }
 
     /// Get the default XDG config path (~/.config/cavibe/config.toml)

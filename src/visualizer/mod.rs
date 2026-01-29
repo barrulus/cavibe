@@ -1,9 +1,7 @@
 mod ascii_font;
-mod bars;
 mod styles;
 mod text;
 
-pub use bars::BarVisualizer;
 pub use styles::VISUALIZER_STYLES;
 pub use text::TextAnimator;
 
@@ -30,7 +28,6 @@ pub trait Visualizer {
 
 /// Combined visualizer state
 pub struct VisualizerState {
-    pub bar_visualizer: BarVisualizer,
     pub text_animator: TextAnimator,
     pub visualizer_config: VisualizerConfig,
     pub current_style: usize,
@@ -40,7 +37,6 @@ pub struct VisualizerState {
 impl VisualizerState {
     pub fn new(visualizer_config: VisualizerConfig, text_config: TextConfig) -> Self {
         Self {
-            bar_visualizer: BarVisualizer::new(visualizer_config.bars),
             text_animator: TextAnimator::new(text_config),
             visualizer_config,
             current_style: 0,
