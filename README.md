@@ -15,6 +15,29 @@ Cavibe captures system audio, performs frequency analysis, and displays colorful
 - **Terminal mode**: Full TUI experience with keyboard controls
 - **Wallpaper mode**: Native Wayland layer-shell support (Niri, Sway, Hyprland)
 
+## Screenshots
+
+### Wallpaper Mode
+
+![Wallpaper Mode](wallpaper_mode.png)
+*Cavibe running as a desktop wallpaper with spectrum color scheme*
+
+![Wallpaper Under Terminals](wallpaper_mode_under_terminals.png)
+*Wallpaper mode visible behind terminal windows*
+
+![Niri Overview](wallpaper_mode_niri_overview.png)
+*Niri workspace overview showing cavibe wallpaper*
+
+### Terminal Mode
+
+| Mirrored + Spectrum | Mirrored + Fire |
+|---------------------|-----------------|
+| ![Terminal Mode 1](terminal_mode_1.png) | ![Terminal Mode 2](terminal_mode_2.png) |
+
+| Wave + Ocean | Dots + Forest |
+|--------------|---------------|
+| ![Terminal Mode 3](terminal_mode_3.png) | ![Terminal Mode 4](terminal_mode_4.png) |
+
 ## Installation
 
 ### Using Nix

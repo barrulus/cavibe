@@ -284,8 +284,10 @@ use_color_scheme = true
 
     /// Merge CLI arguments into config (CLI takes priority)
     pub fn merge_args(&mut self, args: &crate::Args) {
-        // Display settings
-        self.display.mode = args.mode;
+        // Display settings - only override if explicitly provided via CLI
+        if let Some(mode) = args.mode {
+            self.display.mode = mode;
+        }
         if args.rotate {
             self.display.rotate_styles = true;
         }

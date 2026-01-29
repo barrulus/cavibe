@@ -16,8 +16,8 @@ use display::DisplayMode;
 #[command(author, version, about = "Audio visualizer with animated song display")]
 pub struct Args {
     /// Display mode: terminal or wallpaper
-    #[arg(short, long, default_value = "terminal")]
-    pub mode: DisplayMode,
+    #[arg(short, long)]
+    pub mode: Option<DisplayMode>,
 
     /// Config file path
     #[arg(short, long)]
@@ -139,21 +139,7 @@ pub struct Args {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Initialize logging - only enable info level for wallpaper mode
-    // Terminal mode uses a TUI that would be corrupted by log output
-    let log_level = if args.mode == DisplayMode::Wallpaper {
-        "cavibe=info"
-    } else {
-        "cavibe=error"
-    };
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(log_level.parse()?),
-        )
-        .init();
-
-    // Handle --init-config flag
+    // Handle --init-config flag (before logging init)
     if args.init_config {
         match Config::init_default_config() {
             Ok(path) => {
@@ -182,6 +168,20 @@ async fn main() -> Result<()> {
 
     // Merge CLI arguments (CLI takes priority over config file)
     config.merge_args(&args);
+
+    // Initialize logging - only enable info level for wallpaper mode
+    // Terminal mode uses a TUI that would be corrupted by log output
+    let log_level = if config.display.mode == DisplayMode::Wallpaper {
+        "cavibe=info"
+    } else {
+        "cavibe=error"
+    };
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive(log_level.parse()?),
+        )
+        .init();
 
     // Run the visualizer
     match config.display.mode {

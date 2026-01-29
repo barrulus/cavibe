@@ -162,8 +162,10 @@ impl WallpaperState {
         let track_title = self.track_info.title.clone();
         let track_artist = self.track_info.artist.clone();
         let color_scheme = self.color_scheme;
-        let bar_width = self.config.visualizer.bar_width as usize;
-        let bar_spacing = self.config.visualizer.bar_spacing as usize;
+        // Scale bar dimensions for pixel rendering (config values are for terminal chars ~8-10px)
+        let pixel_scale = 8;
+        let bar_width = (self.config.visualizer.bar_width as usize) * pixel_scale;
+        let bar_spacing = (self.config.visualizer.bar_spacing as usize) * pixel_scale;
         let time = self.time;
 
         render_to_buffer(
