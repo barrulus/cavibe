@@ -8,7 +8,6 @@ use ratatui::prelude::*;
 use std::io::{self, stdout};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tracing::info;
 
 use crate::audio;
 use crate::color::ColorScheme;
@@ -54,8 +53,6 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, config: 
     let mut last_frame = Instant::now();
     let mut style_timer = Instant::now();
     let target_fps = Duration::from_secs_f64(1.0 / 60.0);
-
-    info!("Terminal visualizer started. Press 'q' to quit, 's' to change style, 'c' to change colors.");
 
     loop {
         // Calculate delta time

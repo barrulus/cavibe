@@ -19,3 +19,4 @@ Thumbs.db
 
 # Local config
 config.toml
+release/

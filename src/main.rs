@@ -1,6 +1,5 @@
 use anyhow::Result;
 use clap::Parser;
-use tracing::info;
 
 mod audio;
 mod color;
@@ -138,15 +137,21 @@ pub struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging
+    let args = Args::parse();
+
+    // Initialize logging - only enable info level for wallpaper mode
+    // Terminal mode uses a TUI that would be corrupted by log output
+    let log_level = if args.mode == DisplayMode::Wallpaper {
+        "cavibe=info"
+    } else {
+        "cavibe=error"
+    };
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("cavibe=info".parse()?),
+                .add_directive(log_level.parse()?),
         )
         .init();
-
-    let args = Args::parse();
 
     // Handle --init-config flag
     if args.init_config {
@@ -161,8 +166,6 @@ async fn main() -> Result<()> {
             }
         }
     }
-
-    info!("Starting Cavibe in {:?} mode", args.mode);
 
     // Load config with priority: explicit -c path > XDG config > defaults
     // Then merge CLI args on top
