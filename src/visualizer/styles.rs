@@ -5,30 +5,31 @@ use ratatui::prelude::*;
 
 use super::Visualizer;
 
-/// Calculate evenly distributed x position using integer math to avoid truncation artifacts.
-/// Returns the x coordinate for bar at index `i` out of `count` bars across `width` pixels.
+/// Calculate bar layout parameters.
+/// Returns (bar_draw_width, slot_width, displayable_bar_count) where:
+/// - bar_draw_width: actual width of each bar in characters
+/// - slot_width: total width per bar including spacing
+/// - displayable_bar_count: how many bars can fit in the available width
 #[inline]
-fn bar_x_position(i: usize, count: usize, width: u16) -> u16 {
-    if count == 0 {
-        return 0;
-    }
-    // Use integer math: (i * width) / count
-    // This distributes positions evenly without floating-point truncation issues
-    ((i * width as usize) / count) as u16
+fn calculate_bar_layout(area_width: u16, bar_count: usize, config: &VisualizerConfig) -> (u16, u16, usize) {
+    let bar_width = config.bar_width.max(1);
+    let bar_spacing = config.bar_spacing;
+    let slot_width = bar_width + bar_spacing;
+
+    // Calculate how many bars can fit
+    let max_bars = (area_width as usize) / (slot_width as usize);
+    let displayable = max_bars.min(bar_count);
+
+    (bar_width, slot_width, displayable)
 }
 
-/// Calculate the bar width and spacing based on config proportions.
-/// Returns (bar_draw_width, total_slot_width) where bar_draw_width is how many
-/// pixels to fill for each bar, accounting for the bar_width:bar_spacing ratio.
+/// Calculate x position for bar at index i with given slot width, centered in area
 #[inline]
-fn calculate_bar_dimensions(slot_width: u16, config: &VisualizerConfig) -> u16 {
-    if slot_width == 0 {
-        return 0;
-    }
-    // Calculate ratio of bar to total (bar + spacing)
-    let bar_ratio = config.bar_width as f32 / (config.bar_width + config.bar_spacing) as f32;
-    // Apply ratio to get draw width, minimum 1
-    ((slot_width as f32 * bar_ratio).round() as u16).max(1).min(slot_width)
+fn bar_x_position(i: usize, slot_width: u16, area_x: u16, area_width: u16, displayable_count: usize) -> u16 {
+    // Center the bars in the available area
+    let total_bars_width = displayable_count as u16 * slot_width;
+    let start_offset = (area_width.saturating_sub(total_bars_width)) / 2;
+    area_x + start_offset + (i as u16 * slot_width)
 }
 
 /// Classic vertical bars style
@@ -88,7 +89,7 @@ impl Visualizer for WaveStyle {
         area: Rect,
         audio: &AudioData,
         color_scheme: &ColorScheme,
-        _config: &VisualizerConfig,
+        config: &VisualizerConfig,
     ) {
         if area.width == 0 || area.height == 0 || audio.frequencies.is_empty() {
             return;
@@ -96,16 +97,23 @@ impl Visualizer for WaveStyle {
 
         let center_y = area.y + area.height / 2;
         let bar_count = audio.frequencies.len();
+        let (_, slot_width, displayable) = calculate_bar_layout(area.width, bar_count, config);
 
-        for (i, &magnitude) in audio.frequencies.iter().enumerate() {
-            // Calculate position using integer math for even spacing
-            let x = area.x + bar_x_position(i, bar_count, area.width);
+        if displayable == 0 {
+            return;
+        }
+
+        for i in 0..displayable {
+            let freq_idx = (i * bar_count) / displayable;
+            let magnitude = audio.frequencies[freq_idx];
+
+            let x = bar_x_position(i, slot_width, area.x, area.width, displayable);
             if x >= area.x + area.width {
                 break;
             }
 
             let wave_height = (magnitude * (area.height as f32 / 2.0)) as i16;
-            let position = i as f32 / bar_count as f32;
+            let position = i as f32 / displayable as f32;
 
             // Draw wave line
             for offset in -wave_height..=wave_height {
@@ -139,23 +147,30 @@ impl Visualizer for DotsStyle {
         area: Rect,
         audio: &AudioData,
         color_scheme: &ColorScheme,
-        _config: &VisualizerConfig,
+        config: &VisualizerConfig,
     ) {
         if area.width == 0 || area.height == 0 || audio.frequencies.is_empty() {
             return;
         }
 
         let bar_count = audio.frequencies.len();
+        let (_, slot_width, displayable) = calculate_bar_layout(area.width, bar_count, config);
 
-        for (i, &magnitude) in audio.frequencies.iter().enumerate() {
-            // Calculate position using integer math for even spacing
-            let x = area.x + bar_x_position(i, bar_count, area.width);
+        if displayable == 0 {
+            return;
+        }
+
+        for i in 0..displayable {
+            let freq_idx = (i * bar_count) / displayable;
+            let magnitude = audio.frequencies[freq_idx];
+
+            let x = bar_x_position(i, slot_width, area.x, area.width, displayable);
             if x >= area.x + area.width {
                 break;
             }
 
             let dot_y = area.y + area.height - 1 - (magnitude * (area.height - 1) as f32) as u16;
-            let position = i as f32 / bar_count as f32;
+            let position = i as f32 / displayable as f32;
             let (r, g, b) = color_scheme.get_color(position, magnitude);
 
             // Draw dot
@@ -205,24 +220,24 @@ impl Visualizer for BlocksStyle {
 
         let block_chars = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
         let bar_count = audio.frequencies.len();
+        let (draw_width, slot_width, displayable) = calculate_bar_layout(area.width, bar_count, config);
 
-        for (i, &magnitude) in audio.frequencies.iter().enumerate() {
-            // Calculate bar position and width using integer math for even spacing
-            let x_start = bar_x_position(i, bar_count, area.width);
-            let x_end = bar_x_position(i + 1, bar_count, area.width);
-            let slot_width = (x_end - x_start).max(1);
+        if displayable == 0 {
+            return;
+        }
 
-            let x = area.x + x_start;
+        for i in 0..displayable {
+            let freq_idx = (i * bar_count) / displayable;
+            let magnitude = audio.frequencies[freq_idx];
+
+            let x = bar_x_position(i, slot_width, area.x, area.width, displayable);
             if x >= area.x + area.width {
                 break;
             }
 
-            let position = i as f32 / bar_count as f32;
+            let position = i as f32 / displayable as f32;
             let full_blocks = (magnitude * area.height as f32) as u16;
             let partial = ((magnitude * area.height as f32) % 1.0 * 8.0) as usize;
-
-            // Use config ratio for bar vs spacing
-            let draw_width = calculate_bar_dimensions(slot_width, config);
 
             // Draw full blocks
             for b in 0..full_blocks.min(area.height) {
@@ -231,10 +246,12 @@ impl Visualizer for BlocksStyle {
                 let (r, g, b) = color_scheme.get_color(position, intensity);
 
                 for bx in 0..draw_width {
-                    let cell = frame.buffer_mut().cell_mut((x + bx, y));
-                    if let Some(cell) = cell {
-                        cell.set_char('█');
-                        cell.set_fg(Color::Rgb(r, g, b));
+                    if x + bx < area.x + area.width {
+                        let cell = frame.buffer_mut().cell_mut((x + bx, y));
+                        if let Some(cell) = cell {
+                            cell.set_char('█');
+                            cell.set_fg(Color::Rgb(r, g, b));
+                        }
                     }
                 }
             }
@@ -246,10 +263,12 @@ impl Visualizer for BlocksStyle {
                 let (r, g, b) = color_scheme.get_color(position, intensity);
 
                 for bx in 0..draw_width {
-                    let cell = frame.buffer_mut().cell_mut((x + bx, y));
-                    if let Some(cell) = cell {
-                        cell.set_char(block_chars[partial.min(7)]);
-                        cell.set_fg(Color::Rgb(r, g, b));
+                    if x + bx < area.x + area.width {
+                        let cell = frame.buffer_mut().cell_mut((x + bx, y));
+                        if let Some(cell) = cell {
+                            cell.set_char(block_chars[partial.min(7)]);
+                            cell.set_fg(Color::Rgb(r, g, b));
+                        }
                     }
                 }
             }
@@ -269,21 +288,23 @@ fn render_bars(
     }
 
     let bar_count = audio.frequencies.len();
+    let (draw_width, slot_width, displayable) = calculate_bar_layout(area.width, bar_count, config);
 
-    for (i, &magnitude) in audio.frequencies.iter().enumerate() {
+    if displayable == 0 {
+        return;
+    }
+
+    // Sample frequencies if we have more data than displayable bars
+    for i in 0..displayable {
+        // Map displayable index to frequency index
+        let freq_idx = (i * bar_count) / displayable;
+        let magnitude = audio.frequencies[freq_idx];
+
         let bar_height = (magnitude * area.height as f32) as u16;
         let bar_height = bar_height.min(area.height);
 
-        // Calculate bar position and width using integer math for even spacing
-        let x_start = bar_x_position(i, bar_count, area.width);
-        let x_end = bar_x_position(i + 1, bar_count, area.width);
-        let slot_width = (x_end - x_start).max(1);
-
-        let x = area.x + x_start;
-        let position = i as f32 / bar_count as f32;
-
-        // Use config ratio for bar vs spacing
-        let draw_width = calculate_bar_dimensions(slot_width, config);
+        let x = bar_x_position(i, slot_width, area.x, area.width, displayable);
+        let position = i as f32 / displayable as f32;
 
         if config.mirror {
             let half_height = bar_height / 2;
@@ -297,10 +318,12 @@ fn render_bars(
                 let y_up = center.saturating_sub(y_offset);
                 if y_up >= area.y {
                     for bx in 0..draw_width {
-                        let cell = frame.buffer_mut().cell_mut((x + bx, y_up));
-                        if let Some(cell) = cell {
-                            cell.set_char('█');
-                            cell.set_fg(Color::Rgb(r, g, b));
+                        if x + bx < area.x + area.width {
+                            let cell = frame.buffer_mut().cell_mut((x + bx, y_up));
+                            if let Some(cell) = cell {
+                                cell.set_char('█');
+                                cell.set_fg(Color::Rgb(r, g, b));
+                            }
                         }
                     }
                 }
@@ -309,10 +332,12 @@ fn render_bars(
                 let y_down = center + y_offset;
                 if y_down < area.y + area.height {
                     for bx in 0..draw_width {
-                        let cell = frame.buffer_mut().cell_mut((x + bx, y_down));
-                        if let Some(cell) = cell {
-                            cell.set_char('█');
-                            cell.set_fg(Color::Rgb(r, g, b));
+                        if x + bx < area.x + area.width {
+                            let cell = frame.buffer_mut().cell_mut((x + bx, y_down));
+                            if let Some(cell) = cell {
+                                cell.set_char('█');
+                                cell.set_fg(Color::Rgb(r, g, b));
+                            }
                         }
                     }
                 }

@@ -394,8 +394,16 @@ pub fn render_figlet(text: &str) -> Vec<String> {
 
     for c in text.chars() {
         if let Some(glyph) = get_figlet_char(c) {
+            // Find max width of this character's glyph
+            let max_width = glyph.iter().map(|r| r.chars().count()).max().unwrap_or(0);
+
             for (i, row) in glyph.iter().enumerate() {
+                let row_len = row.chars().count();
                 rows[i].push_str(row);
+                // Pad to max width to ensure all rows are same length
+                for _ in row_len..max_width {
+                    rows[i].push(' ');
+                }
             }
         } else {
             // Unknown char: use space
@@ -418,6 +426,10 @@ pub fn ascii_width(text: &str) -> usize {
 /// Get the width of a rendered Figlet string
 pub fn figlet_width(text: &str) -> usize {
     text.chars()
-        .map(|c| get_figlet_char(c).map(|g| g[0].len()).unwrap_or(4))
+        .map(|c| {
+            get_figlet_char(c)
+                .map(|g| g.iter().map(|r| r.chars().count()).max().unwrap_or(0))
+                .unwrap_or(4)
+        })
         .sum()
 }

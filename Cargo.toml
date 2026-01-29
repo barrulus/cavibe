@@ -47,10 +47,17 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # X11 support for wallpaper mode
 x11rb = { version = "0.13", features = ["allow-unsafe-code"], optional = true }
 
+# Wayland support for wallpaper mode (layer-shell)
+wayland-client = { version = "0.31", optional = true }
+wayland-protocols = { version = "0.32", features = ["client", "staging"], optional = true }
+wayland-protocols-wlr = { version = "0.3", features = ["client"], optional = true }
+smithay-client-toolkit = { version = "0.19", optional = true }
+
 [features]
-default = ["terminal"]
+default = ["terminal", "wayland"]
 terminal = []
 wallpaper = ["dep:x11rb"]
+wayland = ["dep:wayland-client", "dep:wayland-protocols", "dep:wayland-protocols-wlr", "dep:smithay-client-toolkit"]
 
 [profile.release]
 lto = true

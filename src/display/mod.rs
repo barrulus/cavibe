@@ -1,6 +1,9 @@
 pub mod terminal;
 pub mod wallpaper;
 
+#[cfg(feature = "wayland")]
+pub mod wayland;
+
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 

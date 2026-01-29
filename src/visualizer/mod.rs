@@ -120,9 +120,9 @@ impl VisualizerState {
     /// Get the text height based on font style
     fn text_height(&self) -> u16 {
         match self.text_animator.font_style() {
-            FontStyle::Figlet => ascii_font::FIGLET_HEIGHT + 1, // +1 for intensity bar
-            FontStyle::Ascii => ascii_font::ASCII_HEIGHT + 1,   // +1 for intensity bar
-            _ => 3, // Normal/Bold single-line text
+            FontStyle::Figlet => ascii_font::FIGLET_HEIGHT,
+            FontStyle::Ascii => ascii_font::ASCII_HEIGHT,
+            _ => 2, // Normal/Bold single-line text
         }
     }
 }

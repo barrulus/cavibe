@@ -77,11 +77,6 @@ impl TextAnimator {
 
         // Render the text with animation
         self.render_animated_text(frame, area, &text, audio, color_scheme, time, false);
-
-        // Draw intensity bar below text if not at top
-        if self.config.position != TextPosition::Top {
-            self.render_intensity_bar(frame, area, audio, color_scheme);
-        }
     }
 
     fn apply_margins(&self, area: Rect) -> Rect {
@@ -259,8 +254,9 @@ impl TextAnimator {
             self.get_custom_colors(text_width)
         };
 
-        // Calculate start X based on alignment and scrolling
-        let (start_x, scroll_offset) = self.calculate_multiline_position(area, text_width);
+        // Check if we're in scrolling mode
+        let is_scrolling = matches!(self.config.animation_style, TextAnimation::Scroll)
+            && text_width > area.width as usize;
 
         // Calculate vertical center
         let start_y = area.y + (area.height.saturating_sub(font_height as u16)) / 2;
@@ -273,21 +269,44 @@ impl TextAnimator {
             }
 
             let row_chars: Vec<char> = row.chars().collect();
+            let row_len = row_chars.len();
+
+            // Calculate start X for this row based on its actual length
+            let row_start_x = if is_scrolling {
+                // Scrolling mode - will be calculated per-character
+                area.x
+            } else {
+                // Static positioning based on alignment using actual row length
+                match self.config.alignment {
+                    TextAlignment::Left => area.x,
+                    TextAlignment::Center => {
+                        area.x + (area.width.saturating_sub(row_len as u16)) / 2
+                    }
+                    TextAlignment::Right => {
+                        area.x + area.width.saturating_sub(row_len as u16)
+                    }
+                }
+            };
+
             for (col_idx, ch) in row_chars.iter().enumerate() {
-                // Apply scroll offset for scrolling animation
-                let display_col = if scroll_offset > 0 {
+                let x = if is_scrolling {
+                    // Scrolling animation
                     let total_scroll = text_width + area.width as usize;
                     let scroll_pos = (self.scroll_offset as usize) % total_scroll;
-                    col_idx as i32 + area.width as i32 - scroll_pos as i32
+                    let display_col = col_idx as i32 + area.width as i32 - scroll_pos as i32;
+                    let x = area.x as i32 + display_col;
+                    if x < area.x as i32 || x >= (area.x + area.width) as i32 {
+                        continue;
+                    }
+                    x as u16
                 } else {
-                    col_idx as i32 + start_x as i32 - area.x as i32
+                    // Static positioning
+                    let x = row_start_x + col_idx as u16;
+                    if x >= area.x + area.width {
+                        continue;
+                    }
+                    x
                 };
-
-                let x = area.x as i32 + display_col;
-                if x < area.x as i32 || x >= (area.x + area.width) as i32 {
-                    continue;
-                }
-                let x = x as u16;
 
                 // Get color for this column
                 let color_idx = col_idx.min(colors.len().saturating_sub(1));
@@ -302,30 +321,6 @@ impl TextAnimator {
                         cell.set_style(Style::default().bold());
                     }
                 }
-            }
-        }
-    }
-
-    fn calculate_multiline_position(&self, area: Rect, text_width: usize) -> (u16, usize) {
-        let width = area.width as usize;
-
-        match self.config.animation_style {
-            TextAnimation::Scroll if text_width > width => {
-                // Return (area.x, scroll_offset) for scrolling mode
-                (area.x, 1) // Non-zero scroll_offset indicates scrolling
-            }
-            _ => {
-                // Static positioning based on alignment
-                let start_x = match self.config.alignment {
-                    TextAlignment::Left => area.x,
-                    TextAlignment::Center => {
-                        area.x + (area.width.saturating_sub(text_width as u16)) / 2
-                    }
-                    TextAlignment::Right => {
-                        area.x + area.width.saturating_sub(text_width as u16)
-                    }
-                };
-                (start_x, 0)
             }
         }
     }
@@ -450,30 +445,6 @@ impl TextAnimator {
         self.render_animated_text(frame, area, text, audio, color_scheme, time, true);
     }
 
-    fn render_intensity_bar(
-        &self,
-        frame: &mut Frame,
-        area: Rect,
-        audio: &Arc<AudioData>,
-        color_scheme: &ColorScheme,
-    ) {
-        if area.height < 2 {
-            return;
-        }
-
-        let y = area.y + area.height - 1;
-        let bar_width = (audio.intensity * area.width as f32) as u16;
-
-        for x in 0..bar_width {
-            let pos = x as f32 / area.width as f32;
-            let (r, g, b) = color_scheme.get_color(pos, audio.intensity);
-
-            if let Some(cell) = frame.buffer_mut().cell_mut((area.x + x, y)) {
-                cell.set_char('▀');
-                cell.set_fg(Color::Rgb(r, g, b));
-            }
-        }
-    }
 }
 
 impl Default for TextAnimator {

@@ -42,10 +42,10 @@ fn is_wayland() -> bool {
 
 /// Wallpaper/overlay mode
 ///
-/// Renders the visualizer directly to stdout with ANSI escape sequences.
-/// This can be used with tools like xwinwrap (X11) or transparent terminal emulators.
+/// On Wayland: Uses wlr-layer-shell protocol to render as a background layer.
+/// On X11: Renders to stdout with ANSI escape sequences for use with xwinwrap.
 ///
-/// Usage with xwinwrap:
+/// Usage with xwinwrap (X11):
 /// ```bash
 /// xwinwrap -fs -fdt -ni -b -nf -un -o 1.0 -st -- \
 ///   cavibe --mode wallpaper
@@ -53,9 +53,17 @@ fn is_wayland() -> bool {
 pub async fn run(config: Config) -> Result<()> {
     info!("Wallpaper mode requested");
 
-    // Check if we can run in direct mode
     if is_wayland() {
-        return run_wayland_instructions().await;
+        // Use native Wayland layer-shell
+        #[cfg(feature = "wayland")]
+        {
+            return super::wayland::run(config).await;
+        }
+
+        #[cfg(not(feature = "wayland"))]
+        {
+            return run_wayland_instructions().await;
+        }
     }
 
     // For X11 or unknown, try to run in direct terminal mode
@@ -304,7 +312,8 @@ fn render_text_direct(
     Ok(())
 }
 
-/// Print instructions for Wayland users
+/// Print instructions for Wayland users (when wayland feature is disabled)
+#[allow(dead_code)]
 async fn run_wayland_instructions() -> Result<()> {
     println!("Cavibe Wallpaper Mode - Wayland Detected");
     println!("=========================================");
