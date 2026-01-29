@@ -138,7 +138,7 @@ If layer-shell isn't working, you can use a transparent terminal positioned as a
 window-rule {
     match app-id="cavibe-term"
     open-floating true
-    default-floating-position x=0 y=0 relative-to="screen"
+    default-floating-position x=0 y=0 relative-to="top-left"
 }
 
 spawn-at-startup "kitty" "--class" "cavibe-term" "-o" "background_opacity=0.0" "cavibe"
