@@ -585,6 +585,11 @@ pub async fn run(config: Config) -> Result<()> {
     // Create the layer surface
     state.create_layer_surface(&qh);
 
+    // Do a roundtrip to ensure the layer surface gets configured
+    event_queue
+        .roundtrip(&mut state)
+        .context("Failed initial Wayland roundtrip")?;
+
     // Start audio capture
     let (_audio_capture, audio_rx) = audio::create_audio_pipeline(
         config.visualizer.bars,
@@ -612,16 +617,20 @@ pub async fn run(config: Config) -> Result<()> {
         state.last_frame = Instant::now();
         state.update(dt);
 
-        // Process Wayland events (non-blocking to allow responsive shutdown)
-        event_queue
-            .dispatch_pending(&mut state)
-            .context("Wayland dispatch failed")?;
-
-        // Flush any pending requests
+        // Flush outgoing requests
         if event_queue.flush().is_err() {
             // Connection lost
             break;
         }
+
+        // Read and dispatch incoming events (non-blocking)
+        if let Some(guard) = event_queue.prepare_read() {
+            // Non-blocking read
+            let _ = guard.read();
+        }
+        event_queue
+            .dispatch_pending(&mut state)
+            .context("Wayland dispatch failed")?;
 
         // Request next frame and draw if configured
         if state.configured {
