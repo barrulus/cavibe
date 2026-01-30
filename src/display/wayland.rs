@@ -290,49 +290,58 @@ fn render_bars(
     let total_width = displayable * slot_width;
     let start_x = (width.saturating_sub(total_width)) / 2;
 
-    // Prepare frequency data based on mirror mode
-    let render_frequencies: Vec<f32> = if opts.mirror {
-        if opts.reverse_mirror {
-            // Reverse mirror: lows meet in middle, highs on outside
-            // Left half: reversed (high to low), Right half: normal (low to high)
+    // Prepare frequency data based on mirror and reverse settings
+    let render_frequencies: Vec<f32> = match (opts.mirror, opts.reverse_mirror) {
+        (true, true) => {
+            // Mirror + Reverse: lows meet in middle, highs on outside
             let half = displayable / 2;
             let mut result = Vec::with_capacity(displayable);
-            // Left side: high frequencies going inward
+            // Left side: high to low (highs on outside)
             for i in 0..half {
-                let freq_idx = ((half - 1 - i) * frequencies.len()) / half;
+                let freq_idx = ((half - 1 - i) * frequencies.len()) / half.max(1);
                 result.push(frequencies[freq_idx.min(frequencies.len() - 1)]);
             }
-            // Right side: high frequencies going outward (mirrored)
+            // Right side: low to high (mirrored, highs on outside)
             for i in 0..displayable - half {
-                let freq_idx = (i * frequencies.len()) / (displayable - half);
-                result.push(frequencies[freq_idx.min(frequencies.len() - 1)]);
-            }
-            result
-        } else {
-            // Normal mirror: highs meet in middle, lows on outside
-            // Left half: normal (low to high), Right half: reversed (high to low)
-            let half = displayable / 2;
-            let mut result = Vec::with_capacity(displayable);
-            // Left side: low to high going inward
-            for i in 0..half {
-                let freq_idx = (i * frequencies.len()) / half;
-                result.push(frequencies[freq_idx.min(frequencies.len() - 1)]);
-            }
-            // Right side: mirrored (high to low going outward)
-            for i in 0..displayable - half {
-                let freq_idx = ((displayable - half - 1 - i) * frequencies.len()) / (displayable - half);
+                let freq_idx = (i * frequencies.len()) / (displayable - half).max(1);
                 result.push(frequencies[freq_idx.min(frequencies.len() - 1)]);
             }
             result
         }
-    } else {
-        // No mirror: use frequencies as-is
-        (0..displayable)
-            .map(|i| {
-                let freq_idx = (i * frequencies.len()) / displayable;
-                frequencies[freq_idx.min(frequencies.len() - 1)]
-            })
-            .collect()
+        (true, false) => {
+            // Mirror only: highs meet in middle, lows on outside
+            let half = displayable / 2;
+            let mut result = Vec::with_capacity(displayable);
+            // Left side: low to high (lows on outside)
+            for i in 0..half {
+                let freq_idx = (i * frequencies.len()) / half.max(1);
+                result.push(frequencies[freq_idx.min(frequencies.len() - 1)]);
+            }
+            // Right side: high to low (mirrored, lows on outside)
+            for i in 0..displayable - half {
+                let freq_idx = ((displayable - half - 1 - i) * frequencies.len()) / (displayable - half).max(1);
+                result.push(frequencies[freq_idx.min(frequencies.len() - 1)]);
+            }
+            result
+        }
+        (false, true) => {
+            // Reverse only: high frequencies on left, low on right
+            (0..displayable)
+                .map(|i| {
+                    let freq_idx = ((displayable - 1 - i) * frequencies.len()) / displayable.max(1);
+                    frequencies[freq_idx.min(frequencies.len() - 1)]
+                })
+                .collect()
+        }
+        (false, false) => {
+            // Normal: low frequencies on left, high on right
+            (0..displayable)
+                .map(|i| {
+                    let freq_idx = (i * frequencies.len()) / displayable.max(1);
+                    frequencies[freq_idx.min(frequencies.len() - 1)]
+                })
+                .collect()
+        }
     };
 
     for i in 0..displayable {
@@ -376,6 +385,20 @@ fn render_text(
     opts: &RenderOptions,
 ) {
     let text_config = opts.text_config;
+
+    // Debug: log text config on first frame (time near 0)
+    if time < 0.1 {
+        info!(
+            "Text config: position={:?}, alignment={:?}, show_title={}, show_artist={}, margins=({},{},{})",
+            text_config.position,
+            text_config.alignment,
+            text_config.show_title,
+            text_config.show_artist,
+            text_config.margin_top,
+            text_config.margin_bottom,
+            text_config.margin_horizontal
+        );
+    }
 
     // Check if we should show text at all
     if !text_config.show_title && !text_config.show_artist {
@@ -738,6 +761,23 @@ pub async fn run(config: Config) -> Result<()> {
 
     let target_fps = Duration::from_secs_f64(1.0 / 60.0);
 
+    // Style rotation timer
+    let mut style_timer = Instant::now();
+    let rotation_interval = Duration::from_secs(config.display.rotation_interval_secs);
+    let color_schemes = [
+        ColorScheme::Spectrum,
+        ColorScheme::Rainbow,
+        ColorScheme::Fire,
+        ColorScheme::Ocean,
+        ColorScheme::Forest,
+        ColorScheme::Purple,
+        ColorScheme::Monochrome,
+    ];
+    let mut color_scheme_idx = color_schemes
+        .iter()
+        .position(|&c| c == config.visualizer.color_scheme)
+        .unwrap_or(0);
+
     // Main loop
     while state.running {
         let frame_start = Instant::now();
@@ -750,6 +790,14 @@ pub async fn run(config: Config) -> Result<()> {
         let dt = state.last_frame.elapsed().as_secs_f32();
         state.last_frame = Instant::now();
         state.update(dt);
+
+        // Auto-rotate color schemes if enabled
+        if config.display.rotate_styles && style_timer.elapsed() >= rotation_interval {
+            color_scheme_idx = (color_scheme_idx + 1) % color_schemes.len();
+            state.color_scheme = color_schemes[color_scheme_idx];
+            info!("Rotated to color scheme: {:?}", state.color_scheme);
+            style_timer = Instant::now();
+        }
 
         // Flush outgoing requests
         if event_queue.flush().is_err() {
