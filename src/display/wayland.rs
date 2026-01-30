@@ -286,10 +286,11 @@ fn render_bars(
                 if x < width {
                     let idx = (y * width + x) * 4;
                     if idx + 3 < canvas.len() {
-                        canvas[idx] = b;     // B
-                        canvas[idx + 1] = g; // G
-                        canvas[idx + 2] = r; // R
-                        canvas[idx + 3] = (opacity * 255.0) as u8; // A
+                        // Pre-multiplied alpha: RGB values must be multiplied by alpha
+                        canvas[idx] = (b as f32 * opacity) as u8;     // B
+                        canvas[idx + 1] = (g as f32 * opacity) as u8; // G
+                        canvas[idx + 2] = (r as f32 * opacity) as u8; // R
+                        canvas[idx + 3] = (opacity * 255.0) as u8;    // A
                     }
                 }
             }
@@ -414,9 +415,10 @@ fn render_char(canvas: &mut [u8], width: usize, height: usize, x: usize, y: usiz
                         if px < width && py < height {
                             let idx = (py * width + px) * 4;
                             if idx + 3 < canvas.len() {
-                                canvas[idx] = b;
-                                canvas[idx + 1] = g;
-                                canvas[idx + 2] = r;
+                                // Pre-multiplied alpha: RGB values must be multiplied by alpha
+                                canvas[idx] = (b as f32 * opacity) as u8;
+                                canvas[idx + 1] = (g as f32 * opacity) as u8;
+                                canvas[idx + 2] = (r as f32 * opacity) as u8;
                                 canvas[idx + 3] = (opacity * 255.0) as u8;
                             }
                         }
