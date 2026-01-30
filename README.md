@@ -199,8 +199,8 @@ Example configuration:
 ```toml
 [display]
 mode = "terminal"           # "terminal" or "wallpaper"
-rotate_styles = false
-rotation_interval_secs = 30
+rotate_styles = false       # (terminal only)
+rotation_interval_secs = 30 # (terminal only)
 
 [audio]
 sample_rate = 44100
@@ -214,6 +214,7 @@ color_scheme = "spectrum"   # spectrum, rainbow, fire, ocean, forest, purple, mo
 bar_width = 2               # proportional width of bars
 bar_spacing = 1             # proportional spacing between bars
 mirror = false              # mirror visualization from center
+reverse_mirror = false      # with mirror: lows meet in middle, highs on outside
 opacity = 1.0               # 0.0-1.0, bar transparency (wallpaper mode only)
 
 [text]
@@ -222,9 +223,15 @@ show_artist = true
 animation_speed = 1.0
 pulse_intensity = 0.8
 position = "bottom"         # top, bottom, center
-font_style = "normal"       # normal, bold, ascii, figlet
+font_style = "normal"       # normal, bold, ascii, figlet (terminal only)
 alignment = "center"        # left, center, right
-animation_style = "scroll"  # none, scroll, pulse, fade, wave
+animation_style = "scroll"  # none, scroll, pulse, fade, wave (terminal only)
+margin_top = 0
+margin_bottom = 0
+margin_horizontal = 2
+use_color_scheme = true     # false to use custom colors below
+# title_color = { r = 255, g = 255, b = 255 }
+# artist_color = { r = 200, g = 200, b = 200 }
 ```
 
 ## Visualizer Styles

@@ -60,6 +60,10 @@ pub struct Args {
     #[arg(long)]
     pub mirror: bool,
 
+    /// Reverse mirror: lows meet in middle, highs on outside (requires --mirror)
+    #[arg(long)]
+    pub reverse_mirror: bool,
+
     /// Opacity level (0.0-1.0, wallpaper mode only)
     #[arg(long)]
     pub opacity: Option<f32>,

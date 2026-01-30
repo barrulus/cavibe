@@ -33,9 +33,23 @@ use wayland_client::{
 
 use crate::audio::{self, AudioData};
 use crate::color::ColorScheme;
-use crate::config::Config;
+use crate::config::{Config, TextAlignment, TextConfig, TextPosition};
 use crate::metadata::{self, TrackInfo};
 use crate::visualizer::VisualizerState;
+
+/// Options for rendering the visualizer
+struct RenderOptions<'a> {
+    // Visualizer settings
+    bar_width: usize,
+    bar_spacing: usize,
+    mirror: bool,
+    reverse_mirror: bool,
+    opacity: f32,
+    color_scheme: &'a ColorScheme,
+
+    // Text settings
+    text_config: &'a TextConfig,
+}
 
 /// Wayland layer-shell wallpaper renderer
 struct WallpaperState {
@@ -170,7 +184,15 @@ impl WallpaperState {
         let bar_spacing = (self.config.visualizer.bar_spacing as usize) * pixel_scale;
         let time = self.time;
 
-        let opacity = self.config.visualizer.opacity;
+        let render_opts = RenderOptions {
+            bar_width,
+            bar_spacing,
+            mirror: self.config.visualizer.mirror,
+            reverse_mirror: self.config.visualizer.reverse_mirror,
+            opacity: self.config.visualizer.opacity,
+            color_scheme: &color_scheme,
+            text_config: &self.config.text,
+        };
 
         render_to_buffer(
             canvas,
@@ -180,11 +202,8 @@ impl WallpaperState {
             intensity,
             &track_title,
             &track_artist,
-            &color_scheme,
-            bar_width,
-            bar_spacing,
             time,
-            opacity,
+            &render_opts,
         );
 
         // Attach and commit
@@ -210,11 +229,8 @@ fn render_to_buffer(
     intensity: f32,
     track_title: &Option<String>,
     track_artist: &Option<String>,
-    color_scheme: &ColorScheme,
-    bar_width: usize,
-    bar_spacing: usize,
     time: f32,
-    opacity: f32,
+    opts: &RenderOptions,
 ) {
     // Clear to fully transparent (let wallpaper show through)
     for pixel in canvas.chunks_exact_mut(4) {
@@ -225,10 +241,10 @@ fn render_to_buffer(
     }
 
     // Render bars
-    render_bars(canvas, width, height, frequencies, color_scheme, bar_width, bar_spacing, opacity);
+    render_bars(canvas, width, height, frequencies, opts);
 
     // Render text
-    render_text(canvas, width, height, track_title, track_artist, color_scheme, intensity, time, opacity);
+    render_text(canvas, width, height, track_title, track_artist, intensity, time, opts);
 }
 
 fn render_bars(
@@ -236,24 +252,31 @@ fn render_bars(
     width: usize,
     height: usize,
     frequencies: &[f32],
-    color_scheme: &ColorScheme,
-    bar_width: usize,
-    bar_spacing: usize,
-    opacity: f32,
+    opts: &RenderOptions,
 ) {
     if frequencies.is_empty() {
         return;
     }
 
     let bar_count = frequencies.len().min(width);
-    let text_height = 60; // Reserve space for text
-    let bars_height = height.saturating_sub(text_height);
+    // Reserve space for text based on position
+    let text_height = if opts.text_config.show_title || opts.text_config.show_artist {
+        60 + opts.text_config.margin_top as usize + opts.text_config.margin_bottom as usize
+    } else {
+        0
+    };
+
+    let (bars_y_start, bars_height) = match opts.text_config.position {
+        TextPosition::Top => (text_height, height.saturating_sub(text_height)),
+        TextPosition::Bottom => (0, height.saturating_sub(text_height)),
+        TextPosition::Center => (0, height), // Text overlays bars
+    };
 
     if bars_height == 0 {
         return;
     }
 
-    let slot_width = bar_width + bar_spacing;
+    let slot_width = opts.bar_width + opts.bar_spacing;
 
     // Calculate how many bars fit
     let max_bars = width / slot_width.max(1);
@@ -267,9 +290,53 @@ fn render_bars(
     let total_width = displayable * slot_width;
     let start_x = (width.saturating_sub(total_width)) / 2;
 
+    // Prepare frequency data based on mirror mode
+    let render_frequencies: Vec<f32> = if opts.mirror {
+        if opts.reverse_mirror {
+            // Reverse mirror: lows meet in middle, highs on outside
+            // Left half: reversed (high to low), Right half: normal (low to high)
+            let half = displayable / 2;
+            let mut result = Vec::with_capacity(displayable);
+            // Left side: high frequencies going inward
+            for i in 0..half {
+                let freq_idx = ((half - 1 - i) * frequencies.len()) / half;
+                result.push(frequencies[freq_idx.min(frequencies.len() - 1)]);
+            }
+            // Right side: high frequencies going outward (mirrored)
+            for i in 0..displayable - half {
+                let freq_idx = (i * frequencies.len()) / (displayable - half);
+                result.push(frequencies[freq_idx.min(frequencies.len() - 1)]);
+            }
+            result
+        } else {
+            // Normal mirror: highs meet in middle, lows on outside
+            // Left half: normal (low to high), Right half: reversed (high to low)
+            let half = displayable / 2;
+            let mut result = Vec::with_capacity(displayable);
+            // Left side: low to high going inward
+            for i in 0..half {
+                let freq_idx = (i * frequencies.len()) / half;
+                result.push(frequencies[freq_idx.min(frequencies.len() - 1)]);
+            }
+            // Right side: mirrored (high to low going outward)
+            for i in 0..displayable - half {
+                let freq_idx = ((displayable - half - 1 - i) * frequencies.len()) / (displayable - half);
+                result.push(frequencies[freq_idx.min(frequencies.len() - 1)]);
+            }
+            result
+        }
+    } else {
+        // No mirror: use frequencies as-is
+        (0..displayable)
+            .map(|i| {
+                let freq_idx = (i * frequencies.len()) / displayable;
+                frequencies[freq_idx.min(frequencies.len() - 1)]
+            })
+            .collect()
+    };
+
     for i in 0..displayable {
-        let freq_idx = (i * frequencies.len()) / displayable;
-        let magnitude = frequencies[freq_idx];
+        let magnitude = render_frequencies[i];
 
         let bar_height = (magnitude * bars_height as f32) as usize;
         let x_start = start_x + i * slot_width;
@@ -277,20 +344,20 @@ fn render_bars(
 
         // Draw bar from bottom up
         for y_offset in 0..bar_height.min(bars_height) {
-            let y = bars_height - 1 - y_offset;
+            let y = bars_y_start + bars_height - 1 - y_offset;
             let intensity = y_offset as f32 / bars_height as f32;
-            let (r, g, b) = color_scheme.get_color(position, intensity);
+            let (r, g, b) = opts.color_scheme.get_color(position, intensity);
 
-            for bx in 0..bar_width {
+            for bx in 0..opts.bar_width {
                 let x = x_start + bx;
-                if x < width {
+                if x < width && y < height {
                     let idx = (y * width + x) * 4;
                     if idx + 3 < canvas.len() {
                         // Pre-multiplied alpha: RGB values must be multiplied by alpha
-                        canvas[idx] = (b as f32 * opacity) as u8;     // B
-                        canvas[idx + 1] = (g as f32 * opacity) as u8; // G
-                        canvas[idx + 2] = (r as f32 * opacity) as u8; // R
-                        canvas[idx + 3] = (opacity * 255.0) as u8;    // A
+                        canvas[idx] = (b as f32 * opts.opacity) as u8;     // B
+                        canvas[idx + 1] = (g as f32 * opts.opacity) as u8; // G
+                        canvas[idx + 2] = (r as f32 * opts.opacity) as u8; // R
+                        canvas[idx + 3] = (opts.opacity * 255.0) as u8;    // A
                     }
                 }
             }
@@ -304,40 +371,77 @@ fn render_text(
     height: usize,
     track_title: &Option<String>,
     track_artist: &Option<String>,
-    color_scheme: &ColorScheme,
     intensity: f32,
     time: f32,
-    opacity: f32,
+    opts: &RenderOptions,
 ) {
-    let text_area_height = 60;
-    let text_y = height.saturating_sub(text_area_height);
+    let text_config = opts.text_config;
 
-    // Build display text
-    let text = match (track_title, track_artist) {
-        (Some(title), Some(artist)) => format!("{} - {}", title, artist),
-        (Some(title), None) => title.clone(),
-        (None, Some(artist)) => artist.clone(),
-        (None, None) => "cavibe".to_string(),
+    // Check if we should show text at all
+    if !text_config.show_title && !text_config.show_artist {
+        return;
+    }
+
+    // Build display text based on show_title and show_artist settings
+    let text = match (
+        text_config.show_title,
+        text_config.show_artist,
+        track_title,
+        track_artist,
+    ) {
+        (true, true, Some(title), Some(artist)) => format!("{} - {}", title, artist),
+        (true, true, Some(title), None) => title.clone(),
+        (true, true, None, Some(artist)) => artist.clone(),
+        (true, false, Some(title), _) => title.clone(),
+        (false, true, _, Some(artist)) => artist.clone(),
+        _ => "cavibe".to_string(),
     };
 
-    // Scale factor for the bitmap font (2x for better visibility on high-res displays)
+    // Scale factor for the bitmap font
     let scale = 3;
     let char_width = 8 * scale;
     let char_height = 8 * scale;
-    let char_spacing = 1 * scale; // Small gap between characters
+    let char_spacing = 1 * scale;
+
+    let text_area_height = 60;
+    let margin_h = text_config.margin_horizontal as usize;
+
+    // Calculate text Y position based on position setting
+    let text_y = match text_config.position {
+        TextPosition::Top => text_config.margin_top as usize,
+        TextPosition::Bottom => height.saturating_sub(text_area_height + text_config.margin_bottom as usize),
+        TextPosition::Center => (height.saturating_sub(char_height)) / 2,
+    };
 
     let text_width = text.len() * (char_width + char_spacing);
-    let start_x = (width.saturating_sub(text_width)) / 2;
-    let y = text_y + (text_area_height - char_height) / 2;
+    let available_width = width.saturating_sub(margin_h * 2);
 
-    // Get gradient colors for text
-    let colors = color_scheme.get_text_gradient(text.len(), intensity, time);
+    // Calculate X position based on alignment
+    let start_x = match text_config.alignment {
+        TextAlignment::Left => margin_h,
+        TextAlignment::Center => margin_h + (available_width.saturating_sub(text_width)) / 2,
+        TextAlignment::Right => margin_h + available_width.saturating_sub(text_width),
+    };
+
+    let y = text_y + (text_area_height.saturating_sub(char_height)) / 2;
+
+    // Get colors for text
+    let colors: Vec<(u8, u8, u8)> = if text_config.use_color_scheme {
+        // Use animated color scheme gradient
+        opts.color_scheme.get_text_gradient(text.len(), intensity * text_config.pulse_intensity, time * text_config.animation_speed)
+    } else if let Some(title_color) = text_config.title_color {
+        // Use custom title color for all text
+        vec![(title_color.r, title_color.g, title_color.b); text.len()]
+    } else {
+        // Default white
+        vec![(255, 255, 255); text.len()]
+    };
 
     for (i, ch) in text.chars().enumerate() {
         let x = start_x + i * (char_width + char_spacing);
         let (r, g, b) = colors.get(i).copied().unwrap_or((255, 255, 255));
 
-        render_char(canvas, width, height, x, y, ch, r, g, b, scale, opacity);
+        render_char(canvas, width, height, x, y, ch, r, g, b, scale, opts.opacity);
     }
 }
 

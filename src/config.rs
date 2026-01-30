@@ -37,6 +37,9 @@ pub struct VisualizerConfig {
     pub bar_width: u16,
     pub bar_spacing: u16,
     pub mirror: bool,
+    /// When true with mirror, reverses the pattern: lows meet in middle, highs on outside
+    #[serde(default)]
+    pub reverse_mirror: bool,
     #[serde(default = "default_opacity")]
     pub opacity: f32,
 }
@@ -148,6 +151,7 @@ impl Default for Config {
                 bar_width: 2,
                 bar_spacing: 1,
                 mirror: false,
+                reverse_mirror: false,
                 opacity: 1.0,
             },
             text: TextConfig {
@@ -257,6 +261,8 @@ bar_width = 2
 bar_spacing = 1
 # Mirror visualization horizontally
 mirror = false
+# Reverse mirror: lows meet in middle, highs on outside (requires mirror = true)
+reverse_mirror = false
 # Opacity level (0.0-1.0, where 1.0 is fully opaque, wallpaper mode only)
 opacity = 1.0
 
@@ -328,6 +334,9 @@ use_color_scheme = true
         }
         if args.mirror {
             self.visualizer.mirror = true;
+        }
+        if args.reverse_mirror {
+            self.visualizer.reverse_mirror = true;
         }
         if let Some(opacity) = args.opacity {
             self.visualizer.opacity = opacity.clamp(0.0, 1.0);
