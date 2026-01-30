@@ -37,6 +37,12 @@ pub struct VisualizerConfig {
     pub bar_width: u16,
     pub bar_spacing: u16,
     pub mirror: bool,
+    #[serde(default = "default_opacity")]
+    pub opacity: f32,
+}
+
+fn default_opacity() -> f32 {
+    1.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -142,6 +148,7 @@ impl Default for Config {
                 bar_width: 2,
                 bar_spacing: 1,
                 mirror: false,
+                opacity: 1.0,
             },
             text: TextConfig {
                 show_title: true,
@@ -250,6 +257,8 @@ bar_width = 2
 bar_spacing = 1
 # Mirror visualization horizontally
 mirror = false
+# Opacity level (0.0-1.0, where 1.0 is fully opaque, wallpaper mode only)
+opacity = 1.0
 
 [text]
 # Show track title
@@ -319,6 +328,9 @@ use_color_scheme = true
         }
         if args.mirror {
             self.visualizer.mirror = true;
+        }
+        if let Some(opacity) = args.opacity {
+            self.visualizer.opacity = opacity.clamp(0.0, 1.0);
         }
 
         // Text settings

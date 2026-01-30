@@ -101,6 +101,7 @@ impl WallpaperState {
     }
 
     fn create_layer_surface(&mut self, qh: &QueueHandle<Self>) {
+        info!("Creating layer surface...");
         let surface = self.compositor_state.create_surface(qh);
 
         let layer_surface = self.layer_shell.create_layer_surface(
@@ -120,6 +121,7 @@ impl WallpaperState {
         layer_surface.commit();
 
         self.layer_surface = Some(layer_surface);
+        info!("Layer surface created, waiting for configure event...");
     }
 
     fn draw(&mut self, _qh: &QueueHandle<Self>) {
@@ -168,6 +170,8 @@ impl WallpaperState {
         let bar_spacing = (self.config.visualizer.bar_spacing as usize) * pixel_scale;
         let time = self.time;
 
+        let opacity = self.config.visualizer.opacity;
+
         render_to_buffer(
             canvas,
             width,
@@ -180,6 +184,7 @@ impl WallpaperState {
             bar_width,
             bar_spacing,
             time,
+            opacity,
         );
 
         // Attach and commit
@@ -209,20 +214,21 @@ fn render_to_buffer(
     bar_width: usize,
     bar_spacing: usize,
     time: f32,
+    opacity: f32,
 ) {
-    // Clear to transparent/black
+    // Clear to fully transparent (let wallpaper show through)
     for pixel in canvas.chunks_exact_mut(4) {
         pixel[0] = 0; // B
         pixel[1] = 0; // G
         pixel[2] = 0; // R
-        pixel[3] = 0; // A (transparent)
+        pixel[3] = 0; // A - fully transparent background
     }
 
     // Render bars
-    render_bars(canvas, width, height, frequencies, color_scheme, bar_width, bar_spacing);
+    render_bars(canvas, width, height, frequencies, color_scheme, bar_width, bar_spacing, opacity);
 
     // Render text
-    render_text(canvas, width, height, track_title, track_artist, color_scheme, intensity, time);
+    render_text(canvas, width, height, track_title, track_artist, color_scheme, intensity, time, opacity);
 }
 
 fn render_bars(
@@ -233,6 +239,7 @@ fn render_bars(
     color_scheme: &ColorScheme,
     bar_width: usize,
     bar_spacing: usize,
+    opacity: f32,
 ) {
     if frequencies.is_empty() {
         return;
@@ -282,7 +289,7 @@ fn render_bars(
                         canvas[idx] = b;     // B
                         canvas[idx + 1] = g; // G
                         canvas[idx + 2] = r; // R
-                        canvas[idx + 3] = 255; // A
+                        canvas[idx + 3] = (opacity * 255.0) as u8; // A
                     }
                 }
             }
@@ -299,6 +306,7 @@ fn render_text(
     color_scheme: &ColorScheme,
     intensity: f32,
     time: f32,
+    opacity: f32,
 ) {
     let text_area_height = 60;
     let text_y = height.saturating_sub(text_area_height);
@@ -328,7 +336,7 @@ fn render_text(
         let x = start_x + i * (char_width + char_spacing);
         let (r, g, b) = colors.get(i).copied().unwrap_or((255, 255, 255));
 
-        render_char(canvas, width, height, x, y, ch, r, g, b, scale);
+        render_char(canvas, width, height, x, y, ch, r, g, b, scale, opacity);
     }
 }
 
@@ -389,7 +397,7 @@ fn get_char_bitmap(ch: char) -> Option<[u8; 8]> {
     })
 }
 
-fn render_char(canvas: &mut [u8], width: usize, height: usize, x: usize, y: usize, ch: char, r: u8, g: u8, b: u8, scale: usize) {
+fn render_char(canvas: &mut [u8], width: usize, height: usize, x: usize, y: usize, ch: char, r: u8, g: u8, b: u8, scale: usize, opacity: f32) {
     let bitmap = match get_char_bitmap(ch) {
         Some(b) => b,
         None => return,
@@ -409,7 +417,7 @@ fn render_char(canvas: &mut [u8], width: usize, height: usize, x: usize, y: usiz
                                 canvas[idx] = b;
                                 canvas[idx + 1] = g;
                                 canvas[idx + 2] = r;
-                                canvas[idx + 3] = 255;
+                                canvas[idx + 3] = (opacity * 255.0) as u8;
                             }
                         }
                     }
@@ -591,6 +599,24 @@ pub async fn run(config: Config) -> Result<()> {
     event_queue
         .roundtrip(&mut state)
         .context("Failed initial Wayland roundtrip")?;
+
+    // Wait for layer surface to be configured (handles race at compositor startup)
+    let start = Instant::now();
+    let timeout = Duration::from_secs(30);
+    while !state.configured && start.elapsed() < timeout {
+        event_queue
+            .roundtrip(&mut state)
+            .context("Wayland roundtrip failed while waiting for configure")?;
+        if !state.configured {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    if !state.configured {
+        anyhow::bail!("Layer surface was not configured within 30 seconds - compositor may not support wlr-layer-shell or no outputs available");
+    }
+
+    info!("Layer surface configured successfully");
 
     // Start audio capture
     let (_audio_capture, audio_rx) = audio::create_audio_pipeline(

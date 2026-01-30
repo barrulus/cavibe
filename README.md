@@ -102,8 +102,14 @@ cavibe --mode wallpaper
 To start cavibe as a wallpaper on login, add to your Niri config (`~/.config/niri/config.kdl`):
 
 ```kdl
-spawn-at-startup "cavibe" "--mode" "wallpaper"
+// If cavibe is in your PATH:
+spawn-at-startup "sh" "-c" "cavibe --mode wallpaper"
+
+// Or with full path (replace /home/user with your actual path):
+spawn-at-startup "sh" "-c" "/home/user/dev/cavibe/target/release/cavibe --mode wallpaper"
 ```
+
+Note: Wallpaper mode uses wlr-layer-shell and won't appear in `niri msg windows` - it renders directly on the background layer. Cavibe will wait up to 30 seconds for outputs to become available at startup.
 
 Or create a systemd user service (`~/.config/systemd/user/cavibe.service`):
 
@@ -156,7 +162,7 @@ xwinwrap -fs -fdt -ni -b -nf -un -o 1.0 -st -- cavibe --mode wallpaper
 
 If layer-shell isn't working, you can use a transparent terminal positioned as a background:
 
-**Niri example** (`~/.config/niri/config.kdl`):
+**Niri + Kitty example** (`~/.config/niri/config.kdl`):
 ```kdl
 window-rule {
     match app-id="cavibe-term"
@@ -164,8 +170,21 @@ window-rule {
     default-floating-position x=0 y=0 relative-to="top-left"
 }
 
-spawn-at-startup "kitty" "--class" "cavibe-term" "-o" "background_opacity=0.0" "cavibe"
+spawn-at-startup "kitty" "--class" "cavibe-term" "-o" "background_opacity=0.0" "-e" "cavibe"
 ```
+
+**Niri + Ghostty example** (`~/.config/niri/config.kdl`):
+```kdl
+window-rule {
+    match app-id="cavibe-term"
+    open-floating true
+    default-floating-position x=0 y=0 relative-to="top-left"
+}
+
+spawn-at-startup "ghostty" "--class=cavibe-term" "--background-opacity=0" "-e" "cavibe"
+```
+
+Note: The `app-id` must match what the terminal sets. Use `niri msg windows` to check actual app-ids.
 
 ## Configuration
 
@@ -195,6 +214,7 @@ color_scheme = "spectrum"   # spectrum, rainbow, fire, ocean, forest, purple, mo
 bar_width = 2               # proportional width of bars
 bar_spacing = 1             # proportional spacing between bars
 mirror = false              # mirror visualization from center
+opacity = 1.0               # 0.0-1.0, bar transparency (wallpaper mode only)
 
 [text]
 show_title = true

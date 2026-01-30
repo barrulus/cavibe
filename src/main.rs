@@ -60,6 +60,10 @@ pub struct Args {
     #[arg(long)]
     pub mirror: bool,
 
+    /// Opacity level (0.0-1.0, wallpaper mode only)
+    #[arg(long)]
+    pub opacity: Option<f32>,
+
     // === Audio settings ===
     /// Audio device name (e.g., "pulse")
     #[arg(long)]
