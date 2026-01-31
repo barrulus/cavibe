@@ -83,6 +83,7 @@
             alsa-lib
             pulseaudio
             dbus
+            libxkbcommon
           ];
         };
       });

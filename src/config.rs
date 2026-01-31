@@ -287,11 +287,11 @@ animation_style = "scroll"
 margin_top = 0
 margin_bottom = 0
 margin_horizontal = 2
-# Custom colors (hex format, null = use color scheme)
+# Custom colors (null = use color scheme for title/artist, no background)
 # title_color = { r = 255, g = 255, b = 255 }
 # artist_color = { r = 200, g = 200, b = 200 }
-# background_color = { r = 0, g = 0, b = 0 }
-# Use visualizer color scheme for text
+# background_color = { r = 0, g = 0, b = 0 }  # semi-transparent text background (wallpaper only)
+# Use visualizer color scheme for text gradient
 use_color_scheme = true
 "#
         .to_string()

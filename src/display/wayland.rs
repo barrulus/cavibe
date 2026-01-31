@@ -33,7 +33,7 @@ use wayland_client::{
 
 use crate::audio::{self, AudioData};
 use crate::color::ColorScheme;
-use crate::config::{Config, TextAlignment, TextConfig, TextPosition};
+use crate::config::{Config, FontStyle, TextAlignment, TextAnimation, TextConfig, TextPosition};
 use crate::metadata::{self, TrackInfo};
 use crate::visualizer::VisualizerState;
 
@@ -389,9 +389,11 @@ fn render_text(
     // Debug: log text config on first frame (time near 0)
     if time < 0.1 {
         info!(
-            "Text config: position={:?}, alignment={:?}, show_title={}, show_artist={}, margins=({},{},{})",
+            "Text config: position={:?}, alignment={:?}, font_style={:?}, animation={:?}, show_title={}, show_artist={}, margins=({},{},{})",
             text_config.position,
             text_config.alignment,
+            text_config.font_style,
+            text_config.animation_style,
             text_config.show_title,
             text_config.show_artist,
             text_config.margin_top,
@@ -405,32 +407,45 @@ fn render_text(
         return;
     }
 
-    // Build display text based on show_title and show_artist settings
-    let text = match (
+    // Build display text and track where title ends for color splitting
+    let (text, title_len) = match (
         text_config.show_title,
         text_config.show_artist,
         track_title,
         track_artist,
     ) {
-        (true, true, Some(title), Some(artist)) => format!("{} - {}", title, artist),
-        (true, true, Some(title), None) => title.clone(),
-        (true, true, None, Some(artist)) => artist.clone(),
-        (true, false, Some(title), _) => title.clone(),
-        (false, true, _, Some(artist)) => artist.clone(),
-        _ => "cavibe".to_string(),
+        (true, true, Some(title), Some(artist)) => {
+            let combined = format!("{} - {}", title, artist);
+            (combined, title.len())
+        }
+        (true, true, Some(title), None) => (title.clone(), title.len()),
+        (true, true, None, Some(artist)) => (artist.clone(), 0),
+        (true, false, Some(title), _) => (title.clone(), title.len()),
+        (false, true, _, Some(artist)) => (artist.clone(), 0),
+        _ => ("cavibe".to_string(), 6),
     };
 
-    // Scale factor for the bitmap font
-    let scale = 3;
+    // Scale factor based on font style
+    let scale = match text_config.font_style {
+        FontStyle::Normal => 3,
+        FontStyle::Bold => 4,
+        FontStyle::Ascii => 2,
+        FontStyle::Figlet => 5,
+    };
+
     let char_width = 8 * scale;
     let char_height = 8 * scale;
-    let char_spacing = 1 * scale;
+    let char_spacing = match text_config.font_style {
+        FontStyle::Bold => 2 * scale,
+        FontStyle::Figlet => 1 * scale,
+        _ => 1 * scale,
+    };
 
-    let text_area_height = 60;
+    let text_area_height = char_height + 20;
     let margin_h = text_config.margin_horizontal as usize;
 
     // Calculate text Y position based on position setting
-    let text_y = match text_config.position {
+    let base_text_y = match text_config.position {
         TextPosition::Top => text_config.margin_top as usize,
         TextPosition::Bottom => height.saturating_sub(text_area_height + text_config.margin_bottom as usize),
         TextPosition::Center => (height.saturating_sub(char_height)) / 2,
@@ -439,32 +454,125 @@ fn render_text(
     let text_width = text.len() * (char_width + char_spacing);
     let available_width = width.saturating_sub(margin_h * 2);
 
-    // Calculate X position based on alignment
-    let start_x = match text_config.alignment {
+    // Calculate base X position based on alignment
+    let base_start_x = match text_config.alignment {
         TextAlignment::Left => margin_h,
         TextAlignment::Center => margin_h + (available_width.saturating_sub(text_width)) / 2,
         TextAlignment::Right => margin_h + available_width.saturating_sub(text_width),
     };
 
-    let y = text_y + (text_area_height.saturating_sub(char_height)) / 2;
+    // Apply scroll animation offset if text is wider than available space
+    let scroll_offset = match text_config.animation_style {
+        TextAnimation::Scroll if text_width > available_width => {
+            let scroll_range = text_width - available_width + margin_h * 2;
+            let scroll_speed = text_config.animation_speed * 30.0;
+            let cycle_time = scroll_range as f32 / scroll_speed;
+            let t = (time % (cycle_time * 2.0)) / cycle_time;
+            let normalized = if t > 1.0 { 2.0 - t } else { t }; // Ping-pong
+            (normalized * scroll_range as f32) as isize
+        }
+        _ => 0,
+    };
 
-    // Get colors for text
+    let y = base_text_y + (text_area_height.saturating_sub(char_height)) / 2;
+
+    // Render background if configured
+    if let Some(bg_color) = text_config.background_color {
+        let bg_padding = 10;
+        let bg_x_start = base_start_x.saturating_sub(bg_padding);
+        let bg_x_end = (base_start_x + text_width + bg_padding).min(width);
+        let bg_y_start = base_text_y.saturating_sub(bg_padding);
+        let bg_y_end = (base_text_y + text_area_height + bg_padding).min(height);
+
+        for py in bg_y_start..bg_y_end {
+            for px in bg_x_start..bg_x_end {
+                let idx = (py * width + px) * 4;
+                if idx + 3 < canvas.len() {
+                    canvas[idx] = (bg_color.b as f32 * opts.opacity) as u8;
+                    canvas[idx + 1] = (bg_color.g as f32 * opts.opacity) as u8;
+                    canvas[idx + 2] = (bg_color.r as f32 * opts.opacity) as u8;
+                    canvas[idx + 3] = (opts.opacity * 255.0 * 0.8) as u8; // Slightly transparent
+                }
+            }
+        }
+    }
+
+    // Get colors for text - support separate title/artist colors
     let colors: Vec<(u8, u8, u8)> = if text_config.use_color_scheme {
         // Use animated color scheme gradient
         opts.color_scheme.get_text_gradient(text.len(), intensity * text_config.pulse_intensity, time * text_config.animation_speed)
-    } else if let Some(title_color) = text_config.title_color {
-        // Use custom title color for all text
-        vec![(title_color.r, title_color.g, title_color.b); text.len()]
     } else {
-        // Default white
-        vec![(255, 255, 255); text.len()]
+        // Use custom colors with title/artist split
+        let title_color = text_config.title_color.unwrap_or(crate::config::RgbColor { r: 255, g: 255, b: 255 });
+        let artist_color = text_config.artist_color.unwrap_or(crate::config::RgbColor { r: 200, g: 200, b: 200 });
+
+        text.chars().enumerate().map(|(i, _)| {
+            // Title portion uses title_color, after " - " uses artist_color
+            if title_len > 0 && i >= title_len + 3 {
+                (artist_color.r, artist_color.g, artist_color.b)
+            } else {
+                (title_color.r, title_color.g, title_color.b)
+            }
+        }).collect()
     };
 
     for (i, ch) in text.chars().enumerate() {
-        let x = start_x + i * (char_width + char_spacing);
+        let base_x = (base_start_x as isize - scroll_offset + (i * (char_width + char_spacing)) as isize) as usize;
+
+        // Apply animation effects per character
+        let (char_x, char_y, char_opacity) = match text_config.animation_style {
+            TextAnimation::Wave => {
+                let wave_offset = ((time * text_config.animation_speed * 3.0 + i as f32 * 0.3).sin() * 8.0) as isize;
+                (base_x, (y as isize + wave_offset).max(0) as usize, opts.opacity)
+            }
+            TextAnimation::Pulse => {
+                let pulse = 0.7 + 0.3 * (intensity * text_config.pulse_intensity);
+                (base_x, y, opts.opacity * pulse)
+            }
+            TextAnimation::Fade => {
+                let fade = 0.5 + 0.5 * ((time * text_config.animation_speed).sin() * 0.5 + 0.5);
+                (base_x, y, opts.opacity * fade)
+            }
+            TextAnimation::Scroll | TextAnimation::None => {
+                (base_x, y, opts.opacity)
+            }
+        };
+
+        // Skip if character is outside visible area
+        if char_x >= width || char_x + char_width > width + char_width {
+            continue;
+        }
+
         let (r, g, b) = colors.get(i).copied().unwrap_or((255, 255, 255));
 
-        render_char(canvas, width, height, x, y, ch, r, g, b, scale, opts.opacity);
+        // Render with font style variations
+        match text_config.font_style {
+            FontStyle::Bold => {
+                // Render with slight offset for bold effect
+                render_char(canvas, width, height, char_x, char_y, ch, r, g, b, scale, char_opacity);
+                render_char(canvas, width, height, char_x + 1, char_y, ch, r, g, b, scale, char_opacity);
+                render_char(canvas, width, height, char_x, char_y + 1, ch, r, g, b, scale, char_opacity);
+            }
+            FontStyle::Figlet => {
+                // Render with outline for figlet-like effect
+                let outline_color = (r / 3, g / 3, b / 3);
+                for ox in [0isize, 2].iter() {
+                    for oy in [0isize, 2].iter() {
+                        if *ox != 1 || *oy != 1 {
+                            render_char(canvas, width, height,
+                                (char_x as isize + ox) as usize,
+                                (char_y as isize + oy) as usize,
+                                ch, outline_color.0, outline_color.1, outline_color.2,
+                                scale, char_opacity * 0.5);
+                        }
+                    }
+                }
+                render_char(canvas, width, height, char_x + 1, char_y + 1, ch, r, g, b, scale, char_opacity);
+            }
+            FontStyle::Normal | FontStyle::Ascii => {
+                render_char(canvas, width, height, char_x, char_y, ch, r, g, b, scale, char_opacity);
+            }
+        }
     }
 }
 

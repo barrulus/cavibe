@@ -10,6 +10,8 @@ Cavibe captures system audio, performs frequency analysis, and displays colorful
 - **Color schemes**: Spectrum, rainbow, fire, ocean, forest, purple, monochrome
 - **Animated song text**: Pulsing colors synced to audio intensity
 - **Font styles**: Normal, bold, ASCII art, and Figlet banner text
+- **Text animations**: Scroll, pulse, fade, and wave effects
+- **Custom text colors**: Separate title/artist colors with optional background
 - **MPRIS integration**: Displays current track from Spotify, MPD, VLC, etc.
 - **Style rotation**: Automatically cycle through visualizer styles
 - **Terminal mode**: Full TUI experience with keyboard controls
@@ -199,8 +201,8 @@ Example configuration:
 ```toml
 [display]
 mode = "terminal"           # "terminal" or "wallpaper"
-rotate_styles = false       # (terminal only)
-rotation_interval_secs = 30 # (terminal only)
+rotate_styles = false       # auto-cycle visualizer styles
+rotation_interval_secs = 30 # seconds between style changes
 
 [audio]
 sample_rate = 44100
@@ -223,15 +225,16 @@ show_artist = true
 animation_speed = 1.0
 pulse_intensity = 0.8
 position = "bottom"         # top, bottom, center
-font_style = "normal"       # normal, bold, ascii, figlet (terminal only)
+font_style = "normal"       # normal, bold, ascii, figlet
 alignment = "center"        # left, center, right
-animation_style = "scroll"  # none, scroll, pulse, fade, wave (terminal only)
-margin_top = 0
+animation_style = "scroll"  # none, scroll, pulse, fade, wave
+margin_top = 0              # pixels in wallpaper mode, characters in terminal
 margin_bottom = 0
 margin_horizontal = 2
 use_color_scheme = true     # false to use custom colors below
 # title_color = { r = 255, g = 255, b = 255 }
 # artist_color = { r = 200, g = 200, b = 200 }
+# background_color = { r = 0, g = 0, b = 0 }  # text background (wallpaper only)
 ```
 
 ## Visualizer Styles
@@ -252,6 +255,21 @@ use_color_scheme = true     # false to use custom colors below
 - **Purple**: Magenta/pink
 - **Monochrome**: Grayscale intensity
 
+## Font Styles
+
+- **Normal**: Standard size text (scale 3x in wallpaper mode)
+- **Bold**: Larger text with thicker strokes (scale 4x with multi-pass rendering)
+- **Ascii**: Smaller, compact text (scale 2x)
+- **Figlet**: Large banner-style text with outline effect (scale 5x)
+
+## Text Animations
+
+- **None**: Static text, no animation
+- **Scroll**: Text scrolls horizontally when wider than display area (ping-pong)
+- **Pulse**: Text opacity pulses with audio intensity
+- **Fade**: Text fades in and out over time
+- **Wave**: Characters oscillate up and down in a wave pattern
+
 ## Requirements
 
 - Linux (uses ALSA/PulseAudio and MPRIS)
@@ -263,6 +281,8 @@ use_color_scheme = true     # false to use custom colors below
 - [x] Wallpaper mode (Wayland layer-shell)
 - [x] Figlet/ASCII art text styles
 - [x] Proportional bar width/spacing
+- [x] Text animations in wallpaper mode (scroll, pulse, fade, wave)
+- [x] Custom title/artist colors with background
 - [ ] X11 native wallpaper mode (without xwinwrap)
 - [ ] Album art display
 - [ ] Custom color schemes from config
