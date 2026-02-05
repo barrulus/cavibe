@@ -199,6 +199,29 @@ pub enum CtlAction {
     },
     /// Check if daemon is running
     Ping,
+    /// Change text settings
+    Text {
+        #[command(subcommand)]
+        action: TextAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum TextAction {
+    /// Set text position: top, bottom, center
+    Position {
+        value: String,
+    },
+    /// Set font style: normal, bold, ascii, figlet
+    Font {
+        value: String,
+    },
+    /// Set text animation: scroll, pulse, fade, wave, none
+    Animation {
+        value: String,
+    },
+    /// Toggle text visibility
+    Toggle,
 }
 
 impl CtlAction {
@@ -213,6 +236,12 @@ impl CtlAction {
             CtlAction::Status => "status".to_string(),
             CtlAction::List { what } => format!("list {}", what),
             CtlAction::Ping => "ping".to_string(),
+            CtlAction::Text { action } => match action {
+                TextAction::Position { value } => format!("text position {}", value),
+                TextAction::Font { value } => format!("text font {}", value),
+                TextAction::Animation { value } => format!("text animation {}", value),
+                TextAction::Toggle => "text toggle".to_string(),
+            },
         }
     }
 }

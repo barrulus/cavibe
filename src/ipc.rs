@@ -6,7 +6,7 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info};
 
 use crate::color::ColorScheme;
-use crate::config::Config;
+use crate::config::{Config, FontStyle, TextAnimation, TextPosition};
 use crate::visualizer::{VisualizerState, VISUALIZER_STYLES};
 
 /// Commands sent from IPC server to render loop
@@ -22,6 +22,10 @@ pub enum IpcCommand {
     ListStyles { reply: oneshot::Sender<String> },
     ListColors { reply: oneshot::Sender<String> },
     Ping { reply: oneshot::Sender<String> },
+    TextPosition { value: TextPosition, reply: oneshot::Sender<String> },
+    TextFont { value: FontStyle, reply: oneshot::Sender<String> },
+    TextAnimation { value: TextAnimation, reply: oneshot::Sender<String> },
+    TextToggle { reply: oneshot::Sender<String> },
 }
 
 /// Get the socket path for IPC
@@ -54,6 +58,37 @@ fn parse_command(line: &str, reply: oneshot::Sender<String>) -> Result<IpcComman
         ["list", "styles"] => Ok(IpcCommand::ListStyles { reply }),
         ["list", "colors"] => Ok(IpcCommand::ListColors { reply }),
         ["ping"] => Ok(IpcCommand::Ping { reply }),
+        ["text", "position", val] => {
+            let pos = match *val {
+                "top" => TextPosition::Top,
+                "bottom" => TextPosition::Bottom,
+                "center" => TextPosition::Center,
+                _ => return Err(anyhow::anyhow!("Unknown position: {} (top, bottom, center)", val)),
+            };
+            Ok(IpcCommand::TextPosition { value: pos, reply })
+        }
+        ["text", "font", val] => {
+            let font = match *val {
+                "normal" => FontStyle::Normal,
+                "bold" => FontStyle::Bold,
+                "ascii" => FontStyle::Ascii,
+                "figlet" => FontStyle::Figlet,
+                _ => return Err(anyhow::anyhow!("Unknown font: {} (normal, bold, ascii, figlet)", val)),
+            };
+            Ok(IpcCommand::TextFont { value: font, reply })
+        }
+        ["text", "animation", val] => {
+            let anim = match *val {
+                "scroll" => TextAnimation::Scroll,
+                "pulse" => TextAnimation::Pulse,
+                "fade" => TextAnimation::Fade,
+                "wave" => TextAnimation::Wave,
+                "none" => TextAnimation::None,
+                _ => return Err(anyhow::anyhow!("Unknown animation: {} (scroll, pulse, fade, wave, none)", val)),
+            };
+            Ok(IpcCommand::TextAnimation { value: anim, reply })
+        }
+        ["text", "toggle"] => Ok(IpcCommand::TextToggle { reply }),
         _ => Err(anyhow::anyhow!("Unknown command: {}", line)),
     }
 }
@@ -126,6 +161,30 @@ pub fn process_ipc_command(
         }
         IpcCommand::Ping { reply } => {
             let _ = reply.send("ok: pong".to_string());
+        }
+        IpcCommand::TextPosition { value, reply } => {
+            config.text.position = value;
+            let _ = reply.send(format!("ok: {:?}", value).to_lowercase());
+        }
+        IpcCommand::TextFont { value, reply } => {
+            config.text.font_style = value;
+            let _ = reply.send(format!("ok: {:?}", value).to_lowercase());
+        }
+        IpcCommand::TextAnimation { value, reply } => {
+            config.text.animation_style = value;
+            let _ = reply.send(format!("ok: {:?}", value).to_lowercase());
+        }
+        IpcCommand::TextToggle { reply } => {
+            let both_off = !config.text.show_title && !config.text.show_artist;
+            if both_off {
+                config.text.show_title = true;
+                config.text.show_artist = true;
+                let _ = reply.send("ok: visible".to_string());
+            } else {
+                config.text.show_title = false;
+                config.text.show_artist = false;
+                let _ = reply.send("ok: hidden".to_string());
+            }
         }
     }
 }

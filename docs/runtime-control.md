@@ -16,6 +16,12 @@ cavibe ctl status           # Show current settings
 cavibe ctl list styles      # List available visualizer styles
 cavibe ctl list colors      # List available color schemes
 cavibe ctl ping             # Check if cavibe is running
+
+# Text controls
+cavibe ctl text position top    # Move text to top/bottom/center
+cavibe ctl text font figlet     # Set font: normal, bold, ascii, figlet
+cavibe ctl text animation wave  # Set animation: scroll, pulse, fade, wave, none
+cavibe ctl text toggle          # Show/hide song text
 ```
 
 ## Compositor Keybindings
