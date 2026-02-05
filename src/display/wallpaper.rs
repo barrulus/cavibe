@@ -12,9 +12,82 @@ use tracing::info;
 
 use crate::audio::{self, AudioData};
 use crate::color::ColorScheme;
-use crate::config::{Config, VisualizerConfig};
+use crate::config::{Config, VisualizerConfig, WallpaperAnchor, WallpaperConfig};
 use crate::metadata::{self, TrackInfo};
 use crate::visualizer::VisualizerState;
+
+/// Calculate the render area based on wallpaper config
+fn calculate_render_area(
+    config: &WallpaperConfig,
+    term_width: u16,
+    term_height: u16,
+) -> (u16, u16, u16, u16) {
+    // Get effective margins
+    let (margin_top, margin_right, margin_bottom, margin_left) = config.effective_margins();
+    let margin_top = margin_top.max(0) as u16;
+    let margin_right = margin_right.max(0) as u16;
+    let margin_bottom = margin_bottom.max(0) as u16;
+    let margin_left = margin_left.max(0) as u16;
+
+    // Calculate available area after margins
+    let available_width = term_width.saturating_sub(margin_left + margin_right);
+    let available_height = term_height.saturating_sub(margin_top + margin_bottom);
+
+    // Get configured size or use available area
+    let (width, height) = if let Some((w, h)) = config.get_size(term_width as u32, term_height as u32) {
+        (
+            (w as u16).min(available_width),
+            (h as u16).min(available_height),
+        )
+    } else {
+        (available_width, available_height)
+    };
+
+    // Calculate position based on anchor
+    let (x, y) = match config.anchor {
+        WallpaperAnchor::TopLeft => (margin_left, margin_top),
+        WallpaperAnchor::Top => (
+            margin_left + (available_width.saturating_sub(width)) / 2,
+            margin_top,
+        ),
+        WallpaperAnchor::TopRight => (
+            margin_left + available_width.saturating_sub(width),
+            margin_top,
+        ),
+        WallpaperAnchor::Left => (
+            margin_left,
+            margin_top + (available_height.saturating_sub(height)) / 2,
+        ),
+        WallpaperAnchor::Center => (
+            margin_left + (available_width.saturating_sub(width)) / 2,
+            margin_top + (available_height.saturating_sub(height)) / 2,
+        ),
+        WallpaperAnchor::Right => (
+            margin_left + available_width.saturating_sub(width),
+            margin_top + (available_height.saturating_sub(height)) / 2,
+        ),
+        WallpaperAnchor::BottomLeft => (
+            margin_left,
+            margin_top + available_height.saturating_sub(height),
+        ),
+        WallpaperAnchor::Bottom => (
+            margin_left + (available_width.saturating_sub(width)) / 2,
+            margin_top + available_height.saturating_sub(height),
+        ),
+        WallpaperAnchor::BottomRight => (
+            margin_left + available_width.saturating_sub(width),
+            margin_top + available_height.saturating_sub(height),
+        ),
+        WallpaperAnchor::Fullscreen => (0, 0),
+    };
+
+    // For fullscreen, use full terminal size
+    if config.anchor == WallpaperAnchor::Fullscreen {
+        (0, 0, term_width, term_height)
+    } else {
+        (x, y, width, height)
+    }
+}
 
 /// Calculate evenly distributed x position using integer math to avoid truncation artifacts.
 #[inline]
@@ -118,11 +191,15 @@ async fn run_direct_mode(config: Config) -> Result<()> {
         }
 
         // Get terminal size
-        let (width, height) = terminal::size()?;
-        if width == 0 || height == 0 {
+        let (term_width, term_height) = terminal::size()?;
+        if term_width == 0 || term_height == 0 {
             tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         }
+
+        // Calculate render area based on wallpaper config
+        let (render_x, render_y, width, height) =
+            calculate_render_area(&config.wallpaper, term_width, term_height);
 
         // Update audio data
         let audio = audio_rx.borrow_and_update().clone();
@@ -140,7 +217,17 @@ async fn run_direct_mode(config: Config) -> Result<()> {
         }
 
         // Render frame directly to stdout
-        render_frame(&mut stdout, width, height, &visualizer, &audio, &track, color_scheme)?;
+        render_frame(
+            &mut stdout,
+            render_x,
+            render_y,
+            width,
+            height,
+            &visualizer,
+            &audio,
+            &track,
+            color_scheme,
+        )?;
 
         // Rate limiting
         let elapsed = last_frame.elapsed();
@@ -159,6 +246,8 @@ async fn run_direct_mode(config: Config) -> Result<()> {
 /// Render a single frame directly to stdout using ANSI escape codes
 fn render_frame(
     stdout: &mut impl Write,
+    offset_x: u16,
+    offset_y: u16,
     width: u16,
     height: u16,
     visualizer: &VisualizerState,
@@ -171,10 +260,10 @@ fn render_frame(
     let bars_height = height.saturating_sub(text_height);
 
     // Render bars
-    render_bars_direct(stdout, 0, 0, width, bars_height, audio, color_scheme, &visualizer.visualizer_config)?;
+    render_bars_direct(stdout, offset_x, offset_y, width, bars_height, audio, color_scheme, &visualizer.visualizer_config)?;
 
     // Render text area
-    render_text_direct(stdout, 0, bars_height, width, text_height, track, audio, color_scheme, visualizer.time)?;
+    render_text_direct(stdout, offset_x, offset_y + bars_height, width, text_height, track, audio, color_scheme, visualizer.time)?;
 
     stdout.flush()?;
     Ok(())

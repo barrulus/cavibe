@@ -33,9 +33,27 @@ use wayland_client::{
 
 use crate::audio::{self, AudioData};
 use crate::color::ColorScheme;
-use crate::config::{Config, FontStyle, TextAlignment, TextAnimation, TextConfig, TextPosition};
+use crate::config::{Config, FontStyle, TextAlignment, TextAnimation, TextConfig, TextPosition, WallpaperAnchor};
 use crate::metadata::{self, TrackInfo};
 use crate::visualizer::VisualizerState;
+
+impl WallpaperAnchor {
+    /// Convert to layer-shell Anchor bitflags
+    pub fn to_layer_shell_anchor(self) -> Anchor {
+        match self {
+            WallpaperAnchor::TopLeft => Anchor::TOP | Anchor::LEFT,
+            WallpaperAnchor::Top => Anchor::TOP | Anchor::LEFT | Anchor::RIGHT,
+            WallpaperAnchor::TopRight => Anchor::TOP | Anchor::RIGHT,
+            WallpaperAnchor::Left => Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT,
+            WallpaperAnchor::Center => Anchor::empty(),
+            WallpaperAnchor::Right => Anchor::TOP | Anchor::BOTTOM | Anchor::RIGHT,
+            WallpaperAnchor::BottomLeft => Anchor::BOTTOM | Anchor::LEFT,
+            WallpaperAnchor::Bottom => Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT,
+            WallpaperAnchor::BottomRight => Anchor::BOTTOM | Anchor::RIGHT,
+            WallpaperAnchor::Fullscreen => Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT,
+        }
+    }
+}
 
 /// Options for rendering the visualizer
 struct RenderOptions<'a> {
@@ -66,6 +84,12 @@ struct WallpaperState {
     width: u32,
     height: u32,
     configured: bool,
+
+    // Screen dimensions (from output)
+    screen_width: u32,
+    screen_height: u32,
+    // Explicit size from config (if any)
+    explicit_size: Option<(u32, u32)>,
 
     // Visualizer state
     visualizer: VisualizerState,
@@ -103,6 +127,9 @@ impl WallpaperState {
             width: 0,
             height: 0,
             configured: false,
+            screen_width: 0,
+            screen_height: 0,
+            explicit_size: None,
             visualizer,
             color_scheme,
             audio_data: Arc::new(AudioData::default()),
@@ -116,6 +143,13 @@ impl WallpaperState {
 
     fn create_layer_surface(&mut self, qh: &QueueHandle<Self>) {
         info!("Creating layer surface...");
+
+        // Get screen dimensions from output state before creating surface
+        let (screen_w, screen_h) = self.get_screen_dimensions();
+        self.screen_width = screen_w;
+        self.screen_height = screen_h;
+        info!("Screen dimensions: {}x{}", screen_w, screen_h);
+
         let surface = self.compositor_state.create_surface(qh);
 
         let layer_surface = self.layer_shell.create_layer_surface(
@@ -126,8 +160,25 @@ impl WallpaperState {
             None, // Use default output
         );
 
-        // Configure the layer surface
-        layer_surface.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
+        // Configure anchor based on wallpaper config
+        let anchor = self.config.wallpaper.anchor.to_layer_shell_anchor();
+        layer_surface.set_anchor(anchor);
+        info!("Anchor set to: {:?} -> {:?}", self.config.wallpaper.anchor, anchor);
+
+        // Apply margins
+        let (top, right, bottom, left) = self.config.wallpaper.effective_margins();
+        layer_surface.set_margin(top, right, bottom, left);
+        info!("Margins set to: top={}, right={}, bottom={}, left={}", top, right, bottom, left);
+
+        // Set explicit size if configured (not fullscreen)
+        if self.config.wallpaper.anchor != WallpaperAnchor::Fullscreen {
+            if let Some((w, h)) = self.config.wallpaper.get_size(screen_w, screen_h) {
+                layer_surface.set_size(w, h);
+                self.explicit_size = Some((w, h));
+                info!("Explicit size set to: {}x{}", w, h);
+            }
+        }
+
         layer_surface.set_exclusive_zone(-1); // Don't reserve space
         layer_surface.set_keyboard_interactivity(KeyboardInteractivity::None);
 
@@ -136,6 +187,19 @@ impl WallpaperState {
 
         self.layer_surface = Some(layer_surface);
         info!("Layer surface created, waiting for configure event...");
+    }
+
+    /// Get screen dimensions from the first available output
+    fn get_screen_dimensions(&self) -> (u32, u32) {
+        for output in self.output_state.outputs() {
+            if let Some(info) = self.output_state.info(&output) {
+                if let Some((w, h)) = info.logical_size {
+                    return (w as u32, h as u32);
+                }
+            }
+        }
+        // Fallback if no output info available
+        (1920, 1080)
     }
 
     fn draw(&mut self, _qh: &QueueHandle<Self>) {
@@ -757,13 +821,29 @@ impl LayerShellHandler for WallpaperState {
         configure: LayerSurfaceConfigure,
         _serial: u32,
     ) {
-        let (width, height) = configure.new_size;
+        let (suggested_width, suggested_height) = configure.new_size;
 
-        // If compositor suggests 0 dimensions, use fallback
-        self.width = if width > 0 { width } else { 1920 };
-        self.height = if height > 0 { height } else { 1080 };
+        // Use explicit size if configured, otherwise use compositor suggestion
+        let (width, height) = if let Some((w, h)) = self.explicit_size {
+            // Use our explicit size, but respect compositor's suggestion if it's larger
+            // (compositor may have constraints)
+            if suggested_width > 0 && suggested_height > 0 {
+                (suggested_width.min(w), suggested_height.min(h))
+            } else {
+                (w, h)
+            }
+        } else {
+            // No explicit size - use compositor suggestion or fallback
+            let w = if suggested_width > 0 { suggested_width } else { self.screen_width.max(1920) };
+            let h = if suggested_height > 0 { suggested_height } else { self.screen_height.max(1080) };
+            (w, h)
+        };
 
-        info!("Layer surface configured: {}x{}", self.width, self.height);
+        self.width = width;
+        self.height = height;
+
+        info!("Layer surface configured: {}x{} (suggested: {}x{}, explicit: {:?})",
+              self.width, self.height, suggested_width, suggested_height, self.explicit_size);
 
         // Recreate the pool for new size
         self.pool = None;

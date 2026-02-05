@@ -8,7 +8,7 @@ mod display;
 mod metadata;
 mod visualizer;
 
-use config::{Config, FontStyle, TextAlignment, TextAnimation, TextPosition};
+use config::{Config, FontStyle, TextAlignment, TextAnimation, TextPosition, WallpaperAnchor};
 use display::DisplayMode;
 
 #[derive(Parser, Debug)]
@@ -141,6 +141,19 @@ pub struct Args {
     /// Artist text color (hex, e.g., "#00FF00")
     #[arg(long)]
     pub artist_color: Option<String>,
+
+    // === Wallpaper settings ===
+    /// Wallpaper size: WIDTHxHEIGHT (pixels or %, e.g., "400x300" or "50%x50%")
+    #[arg(long)]
+    pub wallpaper_size: Option<String>,
+
+    /// Wallpaper anchor position
+    #[arg(long, value_enum)]
+    pub wallpaper_anchor: Option<WallpaperAnchor>,
+
+    /// Wallpaper margin from all edges (pixels)
+    #[arg(long)]
+    pub wallpaper_margin: Option<i32>,
 }
 
 #[tokio::main]

@@ -12,6 +12,8 @@ pub struct Config {
     pub audio: AudioConfig,
     pub visualizer: VisualizerConfig,
     pub text: TextConfig,
+    #[serde(default)]
+    pub wallpaper: WallpaperConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,6 +132,168 @@ impl RgbColor {
     }
 }
 
+/// Anchor position for wallpaper (9-point grid + fullscreen)
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, ValueEnum, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum WallpaperAnchor {
+    TopLeft,
+    Top,
+    TopRight,
+    Left,
+    Center,
+    Right,
+    BottomLeft,
+    Bottom,
+    BottomRight,
+    #[default]
+    Fullscreen, // All edges anchored (current default behavior)
+}
+
+/// Size specification for wallpaper
+#[derive(Debug, Clone, PartialEq)]
+pub enum WallpaperSize {
+    Pixels { width: u32, height: u32 },
+    Percentage { width_pct: f32, height_pct: f32 },
+    Mixed { width: WallpaperDimension, height: WallpaperDimension },
+}
+
+/// Single dimension specification (pixels or percentage)
+#[derive(Debug, Clone, PartialEq)]
+pub enum WallpaperDimension {
+    Pixels(u32),
+    Percentage(f32),
+}
+
+impl WallpaperSize {
+    /// Parse size string like "400x300", "50%x50%", or "400x50%"
+    pub fn parse(s: &str) -> Option<Self> {
+        let parts: Vec<&str> = s.split('x').collect();
+        if parts.len() != 2 {
+            return None;
+        }
+
+        let width = Self::parse_dimension(parts[0])?;
+        let height = Self::parse_dimension(parts[1])?;
+
+        Some(WallpaperSize::Mixed { width, height })
+    }
+
+    fn parse_dimension(s: &str) -> Option<WallpaperDimension> {
+        let s = s.trim();
+        if s.ends_with('%') {
+            let pct: f32 = s.trim_end_matches('%').parse().ok()?;
+            if pct > 0.0 && pct <= 100.0 {
+                Some(WallpaperDimension::Percentage(pct))
+            } else {
+                None
+            }
+        } else {
+            let px: u32 = s.parse().ok()?;
+            if px > 0 {
+                Some(WallpaperDimension::Pixels(px))
+            } else {
+                None
+            }
+        }
+    }
+
+    /// Resolve size to actual pixels given screen dimensions
+    pub fn resolve(&self, screen_w: u32, screen_h: u32) -> (u32, u32) {
+        match self {
+            WallpaperSize::Pixels { width, height } => (*width, *height),
+            WallpaperSize::Percentage { width_pct, height_pct } => {
+                let w = (screen_w as f32 * width_pct / 100.0) as u32;
+                let h = (screen_h as f32 * height_pct / 100.0) as u32;
+                (w.max(1), h.max(1))
+            }
+            WallpaperSize::Mixed { width, height } => {
+                let w = match width {
+                    WallpaperDimension::Pixels(px) => *px,
+                    WallpaperDimension::Percentage(pct) => {
+                        ((screen_w as f32 * pct / 100.0) as u32).max(1)
+                    }
+                };
+                let h = match height {
+                    WallpaperDimension::Pixels(px) => *px,
+                    WallpaperDimension::Percentage(pct) => {
+                        ((screen_h as f32 * pct / 100.0) as u32).max(1)
+                    }
+                };
+                (w, h)
+            }
+        }
+    }
+}
+
+/// Wallpaper positioning and sizing config
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WallpaperConfig {
+    pub anchor: WallpaperAnchor,
+    pub width: Option<String>,  // "400" or "50%"
+    pub height: Option<String>, // "300" or "50%"
+    pub margin: i32,            // Uniform margin (shorthand)
+    pub margin_top: i32,
+    pub margin_right: i32,
+    pub margin_bottom: i32,
+    pub margin_left: i32,
+}
+
+impl Default for WallpaperConfig {
+    fn default() -> Self {
+        Self {
+            anchor: WallpaperAnchor::Fullscreen,
+            width: None,
+            height: None,
+            margin: 0,
+            margin_top: 0,
+            margin_right: 0,
+            margin_bottom: 0,
+            margin_left: 0,
+        }
+    }
+}
+
+impl WallpaperConfig {
+    /// Get the effective margins, applying the uniform margin as a base
+    pub fn effective_margins(&self) -> (i32, i32, i32, i32) {
+        let top = if self.margin_top != 0 { self.margin_top } else { self.margin };
+        let right = if self.margin_right != 0 { self.margin_right } else { self.margin };
+        let bottom = if self.margin_bottom != 0 { self.margin_bottom } else { self.margin };
+        let left = if self.margin_left != 0 { self.margin_left } else { self.margin };
+        (top, right, bottom, left)
+    }
+
+    /// Parse and resolve the configured size, if any
+    pub fn get_size(&self, screen_w: u32, screen_h: u32) -> Option<(u32, u32)> {
+        match (&self.width, &self.height) {
+            (Some(w), Some(h)) => {
+                let size_str = format!("{}x{}", w, h);
+                WallpaperSize::parse(&size_str).map(|s| s.resolve(screen_w, screen_h))
+            }
+            (Some(w), None) => {
+                // Width only - use screen height
+                let w_dim = WallpaperSize::parse_dimension(w)?;
+                let width = match w_dim {
+                    WallpaperDimension::Pixels(px) => px,
+                    WallpaperDimension::Percentage(pct) => ((screen_w as f32 * pct / 100.0) as u32).max(1),
+                };
+                Some((width, screen_h))
+            }
+            (None, Some(h)) => {
+                // Height only - use screen width
+                let h_dim = WallpaperSize::parse_dimension(h)?;
+                let height = match h_dim {
+                    WallpaperDimension::Pixels(px) => px,
+                    WallpaperDimension::Percentage(pct) => ((screen_h as f32 * pct / 100.0) as u32).max(1),
+                };
+                Some((screen_w, height))
+            }
+            (None, None) => None,
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -171,6 +335,7 @@ impl Default for Config {
                 background_color: None,
                 use_color_scheme: true,
             },
+            wallpaper: WallpaperConfig::default(),
         }
     }
 }
@@ -293,6 +458,21 @@ margin_horizontal = 2
 # background_color = { r = 0, g = 0, b = 0 }  # semi-transparent text background (wallpaper only)
 # Use visualizer color scheme for text gradient
 use_color_scheme = true
+
+[wallpaper]
+# Anchor position: fullscreen, center, top, bottom, left, right,
+# top-left, top-right, bottom-left, bottom-right
+anchor = "fullscreen"
+# Size (omit for fullscreen): pixels "400" or percentage "50%"
+# width = "50%"
+# height = "300"
+# Margins from screen edges (pixels) - uniform margin for all edges
+margin = 0
+# Individual margins (override uniform margin if non-zero)
+# margin_top = 0
+# margin_right = 0
+# margin_bottom = 0
+# margin_left = 0
 "#
         .to_string()
     }
@@ -381,6 +561,43 @@ use_color_scheme = true
         }
         if let Some(ref color) = args.artist_color {
             self.text.artist_color = RgbColor::from_hex(color);
+        }
+
+        // Wallpaper settings
+        if let Some(ref size) = args.wallpaper_size {
+            // Parse "WIDTHxHEIGHT" format
+            if let Some(parsed) = WallpaperSize::parse(size) {
+                match parsed {
+                    WallpaperSize::Mixed { width, height } => {
+                        self.wallpaper.width = Some(match width {
+                            WallpaperDimension::Pixels(px) => px.to_string(),
+                            WallpaperDimension::Percentage(pct) => format!("{}%", pct),
+                        });
+                        self.wallpaper.height = Some(match height {
+                            WallpaperDimension::Pixels(px) => px.to_string(),
+                            WallpaperDimension::Percentage(pct) => format!("{}%", pct),
+                        });
+                    }
+                    WallpaperSize::Pixels { width, height } => {
+                        self.wallpaper.width = Some(width.to_string());
+                        self.wallpaper.height = Some(height.to_string());
+                    }
+                    WallpaperSize::Percentage { width_pct, height_pct } => {
+                        self.wallpaper.width = Some(format!("{}%", width_pct));
+                        self.wallpaper.height = Some(format!("{}%", height_pct));
+                    }
+                }
+            }
+        }
+        if let Some(anchor) = args.wallpaper_anchor {
+            self.wallpaper.anchor = anchor;
+        }
+        if let Some(margin) = args.wallpaper_margin {
+            self.wallpaper.margin = margin;
+            self.wallpaper.margin_top = margin;
+            self.wallpaper.margin_right = margin;
+            self.wallpaper.margin_bottom = margin;
+            self.wallpaper.margin_left = margin;
         }
     }
 }
