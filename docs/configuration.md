@@ -17,6 +17,7 @@ rotate_styles = false       # auto-cycle visualizer styles
 rotation_interval_secs = 30 # seconds between style changes
 
 [audio]
+# device = "pulse"          # audio device name (null = default)
 sample_rate = 44100
 buffer_size = 1024
 smoothing = 0.7
@@ -69,3 +70,68 @@ multi_monitor = "clone"     # "clone" (same on all) or "independent" (per-monito
 # style = "wave"
 # opacity = 0.8
 ```
+
+## CLI Arguments
+
+All config values can be overridden from the command line. CLI takes priority over config file.
+
+### General
+
+| Flag | Description |
+|------|-------------|
+| `-m, --mode <MODE>` | Display mode: `terminal` or `wallpaper` |
+| `-c, --config <PATH>` | Config file path |
+| `--init-config` | Generate default config at `~/.config/cavibe/config.toml` |
+| `--no-config` | Skip loading config file |
+
+### Visualizer
+
+| Flag | Description |
+|------|-------------|
+| `-b, --bars <N>` | Number of frequency bars (default: 64) |
+| `--colors <SCHEME>` | Color scheme name |
+| `--bar-width <N>` | Proportional bar width |
+| `--bar-spacing <N>` | Proportional bar spacing |
+| `--mirror` | Mirror visualization horizontally |
+| `--reverse-mirror` | Reverse mirror pattern (requires `--mirror`) |
+| `--opacity <F>` | Opacity 0.0-1.0 (wallpaper mode only) |
+| `--rotate` | Auto-rotate visualizer styles |
+| `--rotate-interval <SECS>` | Rotation interval in seconds (default: 30) |
+
+### Audio
+
+| Flag | Description |
+|------|-------------|
+| `--audio-device <NAME>` | Audio device name (e.g. `"pulse"`) |
+| `--sample-rate <HZ>` | Sample rate (default: 44100) |
+| `--buffer-size <N>` | Audio buffer size (default: 1024) |
+| `--smoothing <F>` | Smoothing factor 0.0-1.0 (default: 0.7) |
+| `-s, --sensitivity <F>` | Audio sensitivity 0.1-10.0 (default: 1.0) |
+
+### Text
+
+| Flag | Description |
+|------|-------------|
+| `--show-title <BOOL>` | Show track title |
+| `--show-artist <BOOL>` | Show artist name |
+| `--text-position <POS>` | Position: `top`, `bottom`, `center`, or `X,Y` coordinates |
+| `--font-style <STYLE>` | Font: `normal`, `bold`, `ascii`, `figlet` |
+| `--text-alignment <ALIGN>` | Alignment: `left`, `center`, `right` |
+| `--text-animation <ANIM>` | Animation: `scroll`, `pulse`, `fade`, `wave`, `none` |
+| `--animation-speed <F>` | Animation speed multiplier |
+| `--pulse-intensity <F>` | Pulse intensity 0.0-1.0 |
+| `--margin-top <N>` | Top margin for text area |
+| `--margin-bottom <N>` | Bottom margin for text area |
+| `--margin-horizontal <N>` | Horizontal margin for text area |
+| `--title-color <HEX>` | Title color (e.g. `"#FF0000"`) |
+| `--artist-color <HEX>` | Artist color (e.g. `"#00FF00"`) |
+
+### Wallpaper
+
+| Flag | Description |
+|------|-------------|
+| `--wallpaper-size <WxH>` | Size: pixels or % (e.g. `"400x300"`, `"50%x50%"`) |
+| `--wallpaper-anchor <POS>` | Anchor position (e.g. `fullscreen`, `center`, `bottom`) |
+| `--wallpaper-margin <PX>` | Uniform margin from all edges |
+| `--output <NAMES>` | Only show on specific outputs (comma-separated, e.g. `"DP-1,HDMI-A-1"`) |
+| `--multi-monitor <MODE>` | Multi-monitor mode: `clone` or `independent` |

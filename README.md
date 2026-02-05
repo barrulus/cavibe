@@ -109,7 +109,7 @@ cavibe ctl toggle
 - [ ] Custom color schemes from config
 - [ ] More visualizer styles
 - [ ] Audio device selection menu
-- [ ] Multi-monitor support for wallpaper mode
+- [x] Multi-monitor support for wallpaper mode
 
 ## Troubleshooting
 

@@ -536,7 +536,7 @@ sensitivity = 1.0
 [visualizer]
 # Number of frequency bars
 bars = 64
-# Color scheme: "spectrum", "rainbow", "fire", "ocean", "monochrome"
+# Color scheme: "spectrum", "rainbow", "fire", "ocean", "forest", "purple", "monochrome"
 color_scheme = "spectrum"
 # Width of each bar in characters
 bar_width = 2

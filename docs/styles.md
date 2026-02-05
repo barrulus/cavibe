@@ -45,6 +45,18 @@ Cycle colors with `c` in terminal mode or `cavibe ctl color next` in wallpaper m
 cavibe --font-style figlet
 ```
 
+## Text Alignment
+
+| Alignment | Description |
+|-----------|-------------|
+| **Left** | Text aligned to the left edge |
+| **Center** | Text centered horizontally (default) |
+| **Right** | Text aligned to the right edge |
+
+```bash
+cavibe --text-alignment right
+```
+
 ## Text Animations
 
 | Animation | Description |
