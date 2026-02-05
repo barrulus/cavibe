@@ -869,8 +869,7 @@ fn render_text(
     let char_height = 8 * scale;
     let char_spacing = match text_config.font_style {
         FontStyle::Bold => 2 * scale,
-        FontStyle::Figlet => 1 * scale,
-        _ => 1 * scale,
+        _ => scale,
     };
 
     let text_area_height = char_height + 20;

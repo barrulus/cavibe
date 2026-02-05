@@ -122,18 +122,13 @@ impl fmt::Display for CoordValue {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum TextPosition {
     Top,
+    #[default]
     Bottom,
     Center,
     Coordinates { x: CoordValue, y: CoordValue },
-}
-
-impl Default for TextPosition {
-    fn default() -> Self {
-        TextPosition::Bottom
-    }
 }
 
 impl fmt::Display for TextPosition {

@@ -124,7 +124,7 @@ impl AudioCapture {
 
         // For now, just use the first known working one
         // A more robust solution would query PulseAudio for available sources
-        for candidate in &candidates {
+        if let Some(candidate) = candidates.first() {
             info!("Trying monitor source: {}", candidate);
             return Some(candidate.to_string());
         }
