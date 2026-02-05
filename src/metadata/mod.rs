@@ -11,23 +11,6 @@ use tracing::{debug, warn};
 pub struct TrackInfo {
     pub title: Option<String>,
     pub artist: Option<String>,
-    pub album: Option<String>,
-    pub playing: bool,
-}
-
-impl TrackInfo {
-    pub fn display_text(&self) -> String {
-        match (&self.title, &self.artist) {
-            (Some(title), Some(artist)) => format!("{} - {}", artist, title),
-            (Some(title), None) => title.clone(),
-            (None, Some(artist)) => artist.clone(),
-            (None, None) => String::new(),
-        }
-    }
-
-    pub fn has_info(&self) -> bool {
-        self.title.is_some() || self.artist.is_some()
-    }
 }
 
 /// MPRIS metadata watcher
@@ -73,13 +56,10 @@ impl MetadataWatcher {
         })?;
 
         let metadata = player.get_metadata()?;
-        let playback_status = player.get_playback_status()?;
 
         Ok(TrackInfo {
             title: metadata.title().map(|s| s.to_string()),
             artist: metadata.artists().map(|a| a.join(", ")),
-            album: metadata.album_name().map(|s| s.to_string()),
-            playing: playback_status == mpris::PlaybackStatus::Playing,
         })
     }
 }

@@ -13,14 +13,8 @@ pub struct AudioData {
     pub frequencies: Vec<f32>,
     /// Overall volume/intensity
     pub intensity: f32,
-    /// Peak frequency index
-    pub peak_index: usize,
     /// Bass intensity (low frequencies)
     pub bass: f32,
-    /// Mid intensity
-    pub mids: f32,
-    /// Treble intensity (high frequencies)
-    pub treble: f32,
 }
 
 impl Default for AudioData {
@@ -28,10 +22,7 @@ impl Default for AudioData {
         Self {
             frequencies: vec![0.0; 64],
             intensity: 0.0,
-            peak_index: 0,
             bass: 0.0,
-            mids: 0.0,
-            treble: 0.0,
         }
     }
 }

@@ -68,26 +68,14 @@ impl FrequencyAnalyzer {
 
         // Calculate overall metrics
         let intensity = smoothed.iter().sum::<f32>() / smoothed.len() as f32;
-        let peak_index = smoothed
-            .iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-            .map(|(i, _)| i)
-            .unwrap_or(0);
 
-        // Split into bass/mids/treble
         let third = smoothed.len() / 3;
         let bass = smoothed[..third].iter().sum::<f32>() / third as f32;
-        let mids = smoothed[third..third * 2].iter().sum::<f32>() / third as f32;
-        let treble = smoothed[third * 2..].iter().sum::<f32>() / (smoothed.len() - third * 2) as f32;
 
         AudioData {
             frequencies: smoothed,
             intensity,
-            peak_index,
             bass,
-            mids,
-            treble,
         }
     }
 

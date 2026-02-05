@@ -12,7 +12,7 @@ use tracing::info;
 
 use crate::audio::{self, AudioData};
 use crate::color::ColorScheme;
-use crate::config::{Config, VisualizerConfig, WallpaperAnchor, WallpaperConfig};
+use crate::config::{Config, TextPosition, VisualizerConfig, WallpaperAnchor, WallpaperConfig};
 use crate::ipc::IpcCommand;
 use crate::metadata::{self, TrackInfo};
 use crate::visualizer::VisualizerState;
@@ -281,15 +281,35 @@ fn render_frame(
     track: &Arc<TrackInfo>,
     color_scheme: &ColorScheme,
 ) -> Result<()> {
-    // Calculate layout - simple split between bars and text
     let text_height = 3u16;
-    let bars_height = height.saturating_sub(text_height);
+    let position = visualizer.text_animator.position();
+
+    // Calculate layout based on text position
+    let (bars_x, bars_y, bars_w, bars_h, text_x, text_y, text_w) = match position {
+        TextPosition::Top => {
+            let bh = height.saturating_sub(text_height);
+            (offset_x, offset_y + text_height, width, bh, offset_x, offset_y, width)
+        }
+        TextPosition::Bottom => {
+            let bh = height.saturating_sub(text_height);
+            (offset_x, offset_y, width, bh, offset_x, offset_y + bh, width)
+        }
+        TextPosition::Center => {
+            let ty = offset_y + (height.saturating_sub(text_height)) / 2;
+            (offset_x, offset_y, width, height, offset_x, ty, width)
+        }
+        TextPosition::Coordinates { x, y } => {
+            let tx = (x.resolve(width as usize) as u16).min(width.saturating_sub(1)) + offset_x;
+            let ty = (y.resolve(height as usize) as u16).min(height.saturating_sub(text_height)) + offset_y;
+            (offset_x, offset_y, width, height, tx, ty, width.saturating_sub(tx - offset_x))
+        }
+    };
 
     // Render bars with current style
-    render_bars_direct(stdout, offset_x, offset_y, width, bars_height, audio, color_scheme, &visualizer.visualizer_config, visualizer.current_style)?;
+    render_bars_direct(stdout, bars_x, bars_y, bars_w, bars_h, audio, color_scheme, &visualizer.visualizer_config, visualizer.current_style)?;
 
     // Render text area
-    render_text_direct(stdout, offset_x, offset_y + bars_height, width, text_height, track, audio, color_scheme, visualizer.time)?;
+    render_text_direct(stdout, text_x, text_y, text_w, text_height, track, audio, color_scheme, visualizer.time)?;
 
     stdout.flush()?;
     Ok(())

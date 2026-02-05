@@ -397,7 +397,7 @@ fn compute_bar_layout(
     let (bars_y_start, bars_height) = match opts.text_config.position {
         TextPosition::Top => (text_height, height.saturating_sub(text_height)),
         TextPosition::Bottom => (0, height.saturating_sub(text_height)),
-        TextPosition::Center => (0, height),
+        TextPosition::Center | TextPosition::Coordinates { .. } => (0, height),
     };
 
     if bars_height == 0 {
@@ -770,20 +770,25 @@ fn render_text(
     let margin_h = text_config.margin_horizontal as usize;
 
     // Calculate text Y position based on position setting
-    let base_text_y = match text_config.position {
-        TextPosition::Top => text_config.margin_top as usize,
-        TextPosition::Bottom => height.saturating_sub(text_area_height + text_config.margin_bottom as usize),
-        TextPosition::Center => (height.saturating_sub(char_height)) / 2,
+    let (base_text_y, coord_x_override) = match text_config.position {
+        TextPosition::Top => (text_config.margin_top as usize, None),
+        TextPosition::Bottom => (height.saturating_sub(text_area_height + text_config.margin_bottom as usize), None),
+        TextPosition::Center => ((height.saturating_sub(char_height)) / 2, None),
+        TextPosition::Coordinates { x, y } => (y.resolve(height), Some(x.resolve(width))),
     };
 
     let text_width = text.len() * (char_width + char_spacing);
     let available_width = width.saturating_sub(margin_h * 2);
 
-    // Calculate base X position based on alignment
-    let base_start_x = match text_config.alignment {
-        TextAlignment::Left => margin_h,
-        TextAlignment::Center => margin_h + (available_width.saturating_sub(text_width)) / 2,
-        TextAlignment::Right => margin_h + available_width.saturating_sub(text_width),
+    // Calculate base X position based on alignment (or coordinate override)
+    let base_start_x = if let Some(cx) = coord_x_override {
+        cx
+    } else {
+        match text_config.alignment {
+            TextAlignment::Left => margin_h,
+            TextAlignment::Center => margin_h + (available_width.saturating_sub(text_width)) / 2,
+            TextAlignment::Right => margin_h + available_width.saturating_sub(text_width),
+        }
     };
 
     // Apply scroll animation offset if text is wider than available space

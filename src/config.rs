@@ -1,7 +1,9 @@
 use anyhow::Result;
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use crate::color::ColorScheme;
 use crate::display::DisplayMode;
@@ -70,13 +72,112 @@ pub struct TextConfig {
     pub use_color_scheme: bool,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, ValueEnum, PartialEq)]
-#[serde(rename_all = "lowercase")]
+/// A coordinate value that can be pixels or a percentage of the total dimension.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CoordValue {
+    Pixels(i32),
+    Percent(f32),
+}
+
+impl CoordValue {
+    /// Resolve this coordinate value to an absolute pixel/cell position.
+    pub fn resolve(&self, total: usize) -> usize {
+        match self {
+            CoordValue::Pixels(px) => (*px).max(0) as usize,
+            CoordValue::Percent(pct) => (total as f32 * pct / 100.0) as usize,
+        }
+    }
+}
+
+impl fmt::Display for CoordValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CoordValue::Pixels(px) => write!(f, "{}", px),
+            CoordValue::Percent(pct) => write!(f, "{}%", pct),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TextPosition {
     Top,
-    #[default]
     Bottom,
     Center,
+    Coordinates { x: CoordValue, y: CoordValue },
+}
+
+impl Default for TextPosition {
+    fn default() -> Self {
+        TextPosition::Bottom
+    }
+}
+
+impl fmt::Display for TextPosition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TextPosition::Top => write!(f, "top"),
+            TextPosition::Bottom => write!(f, "bottom"),
+            TextPosition::Center => write!(f, "center"),
+            TextPosition::Coordinates { x, y } => write!(f, "{},{}", x, y),
+        }
+    }
+}
+
+impl FromStr for TextPosition {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_lowercase().as_str() {
+            "top" => Ok(TextPosition::Top),
+            "bottom" => Ok(TextPosition::Bottom),
+            "center" => Ok(TextPosition::Center),
+            other => {
+                // Try parsing as "X,Y" coordinates
+                let parts: Vec<&str> = other.split(',').collect();
+                if parts.len() != 2 {
+                    return Err(format!(
+                        "Invalid text position '{}': expected top, bottom, center, or X,Y coordinates",
+                        s
+                    ));
+                }
+                let x = parse_coord_value(parts[0].trim())
+                    .map_err(|e| format!("Invalid X coordinate '{}': {}", parts[0].trim(), e))?;
+                let y = parse_coord_value(parts[1].trim())
+                    .map_err(|e| format!("Invalid Y coordinate '{}': {}", parts[1].trim(), e))?;
+                Ok(TextPosition::Coordinates { x, y })
+            }
+        }
+    }
+}
+
+fn parse_coord_value(s: &str) -> Result<CoordValue, String> {
+    if s.ends_with('%') {
+        let num = s.trim_end_matches('%');
+        let pct: f32 = num.parse().map_err(|_| format!("not a valid number: {}", num))?;
+        Ok(CoordValue::Percent(pct))
+    } else {
+        let px: i32 = s.parse().map_err(|_| format!("not a valid number: {}", s))?;
+        Ok(CoordValue::Pixels(px))
+    }
+}
+
+impl Serialize for TextPosition {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for TextPosition {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        TextPosition::from_str(&s).map_err(serde::de::Error::custom)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, ValueEnum, PartialEq)]
@@ -151,10 +252,9 @@ pub enum WallpaperAnchor {
 
 /// Size specification for wallpaper
 #[derive(Debug, Clone, PartialEq)]
-pub enum WallpaperSize {
-    Pixels { width: u32, height: u32 },
-    Percentage { width_pct: f32, height_pct: f32 },
-    Mixed { width: WallpaperDimension, height: WallpaperDimension },
+pub struct WallpaperSize {
+    pub width: WallpaperDimension,
+    pub height: WallpaperDimension,
 }
 
 /// Single dimension specification (pixels or percentage)
@@ -175,7 +275,7 @@ impl WallpaperSize {
         let width = Self::parse_dimension(parts[0])?;
         let height = Self::parse_dimension(parts[1])?;
 
-        Some(WallpaperSize::Mixed { width, height })
+        Some(WallpaperSize { width, height })
     }
 
     fn parse_dimension(s: &str) -> Option<WallpaperDimension> {
@@ -199,29 +299,19 @@ impl WallpaperSize {
 
     /// Resolve size to actual pixels given screen dimensions
     pub fn resolve(&self, screen_w: u32, screen_h: u32) -> (u32, u32) {
-        match self {
-            WallpaperSize::Pixels { width, height } => (*width, *height),
-            WallpaperSize::Percentage { width_pct, height_pct } => {
-                let w = (screen_w as f32 * width_pct / 100.0) as u32;
-                let h = (screen_h as f32 * height_pct / 100.0) as u32;
-                (w.max(1), h.max(1))
+        let w = match self.width {
+            WallpaperDimension::Pixels(px) => px,
+            WallpaperDimension::Percentage(pct) => {
+                ((screen_w as f32 * pct / 100.0) as u32).max(1)
             }
-            WallpaperSize::Mixed { width, height } => {
-                let w = match width {
-                    WallpaperDimension::Pixels(px) => *px,
-                    WallpaperDimension::Percentage(pct) => {
-                        ((screen_w as f32 * pct / 100.0) as u32).max(1)
-                    }
-                };
-                let h = match height {
-                    WallpaperDimension::Pixels(px) => *px,
-                    WallpaperDimension::Percentage(pct) => {
-                        ((screen_h as f32 * pct / 100.0) as u32).max(1)
-                    }
-                };
-                (w, h)
+        };
+        let h = match self.height {
+            WallpaperDimension::Pixels(px) => px,
+            WallpaperDimension::Percentage(pct) => {
+                ((screen_h as f32 * pct / 100.0) as u32).max(1)
             }
-        }
+        };
+        (w, h)
     }
 }
 
@@ -440,7 +530,8 @@ show_artist = true
 animation_speed = 1.0
 # Pulse intensity on beat (0.0-1.0)
 pulse_intensity = 0.8
-# Text position: top, bottom, center
+# Text position: top, bottom, center, or "X,Y" coordinates (pixels or percentages)
+# Examples: "bottom", "200,600", "25%,75%", "50%,90%"
 position = "bottom"
 # Font style: normal, bold, ascii, figlet
 font_style = "normal"
@@ -567,26 +658,14 @@ margin = 0
         if let Some(ref size) = args.wallpaper_size {
             // Parse "WIDTHxHEIGHT" format
             if let Some(parsed) = WallpaperSize::parse(size) {
-                match parsed {
-                    WallpaperSize::Mixed { width, height } => {
-                        self.wallpaper.width = Some(match width {
-                            WallpaperDimension::Pixels(px) => px.to_string(),
-                            WallpaperDimension::Percentage(pct) => format!("{}%", pct),
-                        });
-                        self.wallpaper.height = Some(match height {
-                            WallpaperDimension::Pixels(px) => px.to_string(),
-                            WallpaperDimension::Percentage(pct) => format!("{}%", pct),
-                        });
-                    }
-                    WallpaperSize::Pixels { width, height } => {
-                        self.wallpaper.width = Some(width.to_string());
-                        self.wallpaper.height = Some(height.to_string());
-                    }
-                    WallpaperSize::Percentage { width_pct, height_pct } => {
-                        self.wallpaper.width = Some(format!("{}%", width_pct));
-                        self.wallpaper.height = Some(format!("{}%", height_pct));
-                    }
-                }
+                self.wallpaper.width = Some(match parsed.width {
+                    WallpaperDimension::Pixels(px) => px.to_string(),
+                    WallpaperDimension::Percentage(pct) => format!("{}%", pct),
+                });
+                self.wallpaper.height = Some(match parsed.height {
+                    WallpaperDimension::Pixels(px) => px.to_string(),
+                    WallpaperDimension::Percentage(pct) => format!("{}%", pct),
+                });
             }
         }
         if let Some(anchor) = args.wallpaper_anchor {

@@ -59,12 +59,8 @@ fn parse_command(line: &str, reply: oneshot::Sender<String>) -> Result<IpcComman
         ["list", "colors"] => Ok(IpcCommand::ListColors { reply }),
         ["ping"] => Ok(IpcCommand::Ping { reply }),
         ["text", "position", val] => {
-            let pos = match *val {
-                "top" => TextPosition::Top,
-                "bottom" => TextPosition::Bottom,
-                "center" => TextPosition::Center,
-                _ => return Err(anyhow::anyhow!("Unknown position: {} (top, bottom, center)", val)),
-            };
+            let pos = val.parse::<TextPosition>()
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
             Ok(IpcCommand::TextPosition { value: pos, reply })
         }
         ["text", "font", val] => {
@@ -164,7 +160,7 @@ pub fn process_ipc_command(
         }
         IpcCommand::TextPosition { value, reply } => {
             config.text.position = value;
-            let _ = reply.send(format!("ok: {:?}", value).to_lowercase());
+            let _ = reply.send(format!("ok: {}", value));
         }
         IpcCommand::TextFont { value, reply } => {
             config.text.font_style = value;

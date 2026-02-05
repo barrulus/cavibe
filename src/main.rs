@@ -110,7 +110,7 @@ pub struct Args {
     #[arg(long)]
     pub pulse_intensity: Option<f32>,
 
-    /// Text position: top, bottom, center
+    /// Text position: top, bottom, center, or X,Y coordinates (e.g. "50%,90%")
     #[arg(long)]
     pub text_position: Option<TextPosition>,
 

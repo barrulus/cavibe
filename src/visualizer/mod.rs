@@ -118,6 +118,13 @@ impl VisualizerState {
                 let text_area = Rect::new(area.x, text_y, area.width, text_height);
                 (area, text_area)
             }
+            TextPosition::Coordinates { x, y } => {
+                // Text overlays at specified coordinates (bars get full area)
+                let text_x = (x.resolve(area.width as usize) as u16).min(area.width.saturating_sub(1)) + area.x;
+                let text_y = (y.resolve(area.height as usize) as u16).min(area.height.saturating_sub(text_height)) + area.y;
+                let text_area = Rect::new(text_x, text_y, area.width.saturating_sub(text_x - area.x), text_height);
+                (area, text_area)
+            }
         }
     }
 

@@ -18,10 +18,13 @@ cavibe ctl list colors      # List available color schemes
 cavibe ctl ping             # Check if cavibe is running
 
 # Text controls
-cavibe ctl text position top    # Move text to top/bottom/center
-cavibe ctl text font figlet     # Set font: normal, bold, ascii, figlet
-cavibe ctl text animation wave  # Set animation: scroll, pulse, fade, wave, none
-cavibe ctl text toggle          # Show/hide song text
+cavibe ctl text position top        # Move text to top/bottom/center
+cavibe ctl text position 50%,90%    # Move text to coordinates (percentage)
+cavibe ctl text position 200,600    # Move text to coordinates (pixels)
+cavibe ctl text position 25%,600    # Mixed: percentage X, pixel Y
+cavibe ctl text font figlet         # Set font: normal, bold, ascii, figlet
+cavibe ctl text animation wave      # Set animation: scroll, pulse, fade, wave, none
+cavibe ctl text toggle              # Show/hide song text
 ```
 
 ## Compositor Keybindings

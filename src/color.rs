@@ -81,14 +81,6 @@ impl ColorScheme {
         )
     }
 
-    /// Get a pulsing color for text based on audio intensity
-    pub fn get_text_color(&self, base_position: f32, intensity: f32, time: f32) -> (u8, u8, u8) {
-        // Add time-based shimmer effect
-        let shimmer = (time * 2.0).sin() * 0.1;
-        let adjusted_intensity = (intensity + shimmer).clamp(0.0, 1.0);
-        self.get_color(base_position, adjusted_intensity)
-    }
-
     /// Get gradient colors for text characters
     pub fn get_text_gradient(&self, text_len: usize, intensity: f32, time: f32) -> Vec<(u8, u8, u8)> {
         (0..text_len)
@@ -141,14 +133,4 @@ impl ColorScheme {
             ColorScheme::Monochrome => "Monochrome",
         }
     }
-}
-
-/// Interpolate between two colors
-pub fn lerp_color(a: (u8, u8, u8), b: (u8, u8, u8), t: f32) -> (u8, u8, u8) {
-    let t = t.clamp(0.0, 1.0);
-    (
-        (a.0 as f32 + (b.0 as f32 - a.0 as f32) * t) as u8,
-        (a.1 as f32 + (b.1 as f32 - a.1 as f32) * t) as u8,
-        (a.2 as f32 + (b.2 as f32 - a.2 as f32) * t) as u8,
-    )
 }
