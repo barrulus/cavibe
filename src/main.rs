@@ -1,10 +1,11 @@
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 mod audio;
 mod color;
 mod config;
 mod display;
+mod ipc;
 mod metadata;
 mod visualizer;
 
@@ -15,6 +16,9 @@ use display::DisplayMode;
 #[command(name = "cavibe")]
 #[command(author, version, about = "Audio visualizer with animated song display")]
 pub struct Args {
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
     /// Display mode: terminal or wallpaper
     #[arg(short, long)]
     pub mode: Option<DisplayMode>,
@@ -156,9 +160,73 @@ pub struct Args {
     pub wallpaper_margin: Option<i32>,
 }
 
+#[derive(Subcommand, Debug)]
+pub enum Command {
+    /// Control a running cavibe instance
+    Ctl {
+        #[command(subcommand)]
+        action: CtlAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum CtlAction {
+    /// Change visualizer style
+    Style {
+        /// Direction: next, prev
+        direction: String,
+    },
+    /// Change color scheme
+    Color {
+        /// Direction: next, prev
+        direction: String,
+    },
+    /// Toggle visibility
+    Toggle,
+    /// Set opacity (0.0-1.0)
+    Opacity {
+        /// Opacity value
+        value: f32,
+    },
+    /// Reload config file
+    Reload,
+    /// Show current status
+    Status,
+    /// List available options
+    List {
+        /// What to list: styles, colors
+        what: String,
+    },
+    /// Check if daemon is running
+    Ping,
+}
+
+impl CtlAction {
+    /// Convert to the wire protocol line
+    fn to_protocol_line(&self) -> String {
+        match self {
+            CtlAction::Style { direction } => format!("style {}", direction),
+            CtlAction::Color { direction } => format!("color {}", direction),
+            CtlAction::Toggle => "toggle".to_string(),
+            CtlAction::Opacity { value } => format!("opacity {}", value),
+            CtlAction::Reload => "reload".to_string(),
+            CtlAction::Status => "status".to_string(),
+            CtlAction::List { what } => format!("list {}", what),
+            CtlAction::Ping => "ping".to_string(),
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+
+    // Handle ctl subcommand - client mode, no daemon startup
+    if let Some(Command::Ctl { action }) = &args.command {
+        let response = ipc::send_command(&action.to_protocol_line()).await?;
+        println!("{}", response);
+        return Ok(());
+    }
 
     // Handle --init-config flag (before logging init)
     if args.init_config {
@@ -210,7 +278,19 @@ async fn main() -> Result<()> {
             display::terminal::run(config).await?;
         }
         DisplayMode::Wallpaper => {
-            display::wallpaper::run(config).await?;
+            // Create IPC channel and start server
+            let (ipc_tx, ipc_rx) = tokio::sync::mpsc::channel::<ipc::IpcCommand>(32);
+
+            tokio::spawn(async move {
+                if let Err(e) = ipc::start_server(ipc_tx).await {
+                    tracing::warn!("IPC server error: {}", e);
+                }
+            });
+
+            display::wallpaper::run(config, ipc_rx).await?;
+
+            // Clean up socket on exit
+            let _ = std::fs::remove_file(ipc::socket_path());
         }
     }
 

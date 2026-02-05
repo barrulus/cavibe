@@ -34,8 +34,10 @@ use wayland_client::{
 use crate::audio::{self, AudioData};
 use crate::color::ColorScheme;
 use crate::config::{Config, FontStyle, TextAlignment, TextAnimation, TextConfig, TextPosition, WallpaperAnchor};
+use crate::ipc::IpcCommand;
 use crate::metadata::{self, TrackInfo};
 use crate::visualizer::VisualizerState;
+use tokio::sync::mpsc;
 
 impl WallpaperAnchor {
     /// Convert to layer-shell Anchor bitflags
@@ -101,7 +103,11 @@ struct WallpaperState {
 
     // Control
     running: bool,
+    visible: bool,
     config: Config,
+
+    // IPC
+    ipc_rx: mpsc::Receiver<IpcCommand>,
 }
 
 impl WallpaperState {
@@ -112,6 +118,7 @@ impl WallpaperState {
         shm: Shm,
         layer_shell: LayerShell,
         config: Config,
+        ipc_rx: mpsc::Receiver<IpcCommand>,
     ) -> Self {
         let visualizer = VisualizerState::new(config.visualizer.clone(), config.text.clone());
         let color_scheme = config.visualizer.color_scheme;
@@ -137,7 +144,9 @@ impl WallpaperState {
             last_frame: Instant::now(),
             time: 0.0,
             running: true,
+            visible: true,
             config,
+            ipc_rx,
         }
     }
 
@@ -208,6 +217,39 @@ impl WallpaperState {
         }
 
         if self.layer_surface.is_none() {
+            return;
+        }
+
+        if !self.visible {
+            // Render a fully transparent frame
+            if self.pool.is_none() {
+                let pool = SlotPool::new(
+                    (self.width * self.height * 4) as usize,
+                    &self.shm,
+                )
+                .expect("Failed to create slot pool");
+                self.pool = Some(pool);
+            }
+            let pool = self.pool.as_mut().unwrap();
+            let (buffer, canvas) = pool
+                .create_buffer(
+                    self.width as i32,
+                    self.height as i32,
+                    (self.width * 4) as i32,
+                    wl_shm::Format::Argb8888,
+                )
+                .expect("Failed to create buffer");
+            for pixel in canvas.chunks_exact_mut(4) {
+                pixel[0] = 0;
+                pixel[1] = 0;
+                pixel[2] = 0;
+                pixel[3] = 0;
+            }
+            let layer_surface = self.layer_surface.as_ref().unwrap();
+            let surface = layer_surface.wl_surface();
+            buffer.attach_to(surface).expect("Failed to attach buffer");
+            surface.damage_buffer(0, 0, self.width as i32, self.height as i32);
+            surface.commit();
             return;
         }
 
@@ -878,7 +920,7 @@ delegate_shm!(WallpaperState);
 delegate_registry!(WallpaperState);
 
 /// Run the Wayland layer-shell wallpaper mode
-pub async fn run(config: Config) -> Result<()> {
+pub async fn run(config: Config, ipc_rx: mpsc::Receiver<IpcCommand>) -> Result<()> {
     info!("Starting Wayland layer-shell wallpaper mode");
 
     // Connect to Wayland
@@ -907,6 +949,7 @@ pub async fn run(config: Config) -> Result<()> {
         shm,
         layer_shell,
         config.clone(),
+        ipc_rx,
     );
 
     // Create the layer surface
@@ -978,6 +1021,20 @@ pub async fn run(config: Config) -> Result<()> {
         let dt = state.last_frame.elapsed().as_secs_f32();
         state.last_frame = Instant::now();
         state.update(dt);
+
+        // Process IPC commands (non-blocking)
+        while let Ok(cmd) = state.ipc_rx.try_recv() {
+            let mut opacity = state.config.visualizer.opacity;
+            crate::ipc::process_ipc_command(
+                cmd,
+                &mut state.visualizer,
+                &mut state.color_scheme,
+                &mut state.visible,
+                &mut opacity,
+                &mut state.config,
+            );
+            state.config.visualizer.opacity = opacity;
+        }
 
         // Auto-rotate color schemes if enabled
         if config.display.rotate_styles && style_timer.elapsed() >= rotation_interval {

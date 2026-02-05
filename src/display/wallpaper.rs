@@ -13,8 +13,10 @@ use tracing::info;
 use crate::audio::{self, AudioData};
 use crate::color::ColorScheme;
 use crate::config::{Config, VisualizerConfig, WallpaperAnchor, WallpaperConfig};
+use crate::ipc::IpcCommand;
 use crate::metadata::{self, TrackInfo};
 use crate::visualizer::VisualizerState;
+use tokio::sync::mpsc;
 
 /// Calculate the render area based on wallpaper config
 fn calculate_render_area(
@@ -123,30 +125,31 @@ fn is_wayland() -> bool {
 /// xwinwrap -fs -fdt -ni -b -nf -un -o 1.0 -st -- \
 ///   cavibe --mode wallpaper
 /// ```
-pub async fn run(config: Config) -> Result<()> {
+pub async fn run(config: Config, ipc_rx: mpsc::Receiver<IpcCommand>) -> Result<()> {
     info!("Wallpaper mode requested");
 
     if is_wayland() {
         // Use native Wayland layer-shell
         #[cfg(feature = "wayland")]
         {
-            return super::wayland::run(config).await;
+            return super::wayland::run(config, ipc_rx).await;
         }
 
         #[cfg(not(feature = "wayland"))]
         {
+            drop(ipc_rx);
             return run_wayland_instructions().await;
         }
     }
 
     // For X11 or unknown, try to run in direct terminal mode
     // This works with xwinwrap, transparent terminals, etc.
-    run_direct_mode(config).await
+    run_direct_mode(config, ipc_rx).await
 }
 
 /// Run in direct mode - renders to stdout with ANSI codes
 /// Works with xwinwrap, transparent terminals, etc.
-async fn run_direct_mode(config: Config) -> Result<()> {
+async fn run_direct_mode(config: Config, mut ipc_rx: mpsc::Receiver<IpcCommand>) -> Result<()> {
     let mut stdout = stdout();
 
     // Setup terminal
@@ -174,7 +177,10 @@ async fn run_direct_mode(config: Config) -> Result<()> {
 
     // Initialize visualizer
     let mut visualizer = VisualizerState::new(config.visualizer.clone(), config.text.clone());
-    let color_scheme = &config.visualizer.color_scheme;
+    let mut color_scheme = config.visualizer.color_scheme;
+    let mut visible = true;
+    let mut opacity = config.visualizer.opacity;
+    let mut config = config;
 
     let target_fps = 60;
     let frame_duration = Duration::from_secs_f64(1.0 / target_fps as f64);
@@ -188,6 +194,26 @@ async fn run_direct_mode(config: Config) -> Result<()> {
         // Check for shutdown
         if *shutdown_rx.borrow() {
             break;
+        }
+
+        // Process IPC commands (non-blocking)
+        while let Ok(cmd) = ipc_rx.try_recv() {
+            crate::ipc::process_ipc_command(
+                cmd,
+                &mut visualizer,
+                &mut color_scheme,
+                &mut visible,
+                &mut opacity,
+                &mut config,
+            );
+        }
+
+        if !visible {
+            // Clear screen once and sleep
+            execute!(stdout, Clear(ClearType::All))?;
+            tokio::time::sleep(frame_duration).await;
+            last_frame = Instant::now();
+            continue;
         }
 
         // Get terminal size
@@ -226,7 +252,7 @@ async fn run_direct_mode(config: Config) -> Result<()> {
             &visualizer,
             &audio,
             &track,
-            color_scheme,
+            &color_scheme,
         )?;
 
         // Rate limiting

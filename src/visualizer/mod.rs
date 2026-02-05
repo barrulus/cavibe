@@ -53,6 +53,14 @@ impl VisualizerState {
         self.current_style = (self.current_style + 1) % VISUALIZER_STYLES.len();
     }
 
+    pub fn prev_style(&mut self) {
+        if self.current_style == 0 {
+            self.current_style = VISUALIZER_STYLES.len() - 1;
+        } else {
+            self.current_style -= 1;
+        }
+    }
+
     pub fn current_style_name(&self) -> &'static str {
         VISUALIZER_STYLES[self.current_style].name()
     }

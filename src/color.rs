@@ -119,6 +119,28 @@ impl ColorScheme {
         let current = all.iter().position(|c| c == self).unwrap_or(0);
         all[(current + 1) % all.len()]
     }
+
+    pub fn prev(&self) -> Self {
+        let all = Self::all();
+        let current = all.iter().position(|c| c == self).unwrap_or(0);
+        if current == 0 {
+            all[all.len() - 1]
+        } else {
+            all[current - 1]
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            ColorScheme::Spectrum => "Spectrum",
+            ColorScheme::Rainbow => "Rainbow",
+            ColorScheme::Fire => "Fire",
+            ColorScheme::Ocean => "Ocean",
+            ColorScheme::Forest => "Forest",
+            ColorScheme::Purple => "Purple",
+            ColorScheme::Monochrome => "Monochrome",
+        }
+    }
 }
 
 /// Interpolate between two colors
