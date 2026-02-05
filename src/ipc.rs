@@ -21,6 +21,7 @@ pub enum IpcCommand {
     Status { reply: oneshot::Sender<String> },
     ListStyles { reply: oneshot::Sender<String> },
     ListColors { reply: oneshot::Sender<String> },
+    ListMonitors { reply: oneshot::Sender<String> },
     Ping { reply: oneshot::Sender<String> },
     TextPosition { value: TextPosition, reply: oneshot::Sender<String> },
     TextFont { value: FontStyle, reply: oneshot::Sender<String> },
@@ -57,6 +58,7 @@ fn parse_command(line: &str, reply: oneshot::Sender<String>) -> Result<IpcComman
         ["status"] => Ok(IpcCommand::Status { reply }),
         ["list", "styles"] => Ok(IpcCommand::ListStyles { reply }),
         ["list", "colors"] => Ok(IpcCommand::ListColors { reply }),
+        ["list", "monitors"] => Ok(IpcCommand::ListMonitors { reply }),
         ["ping"] => Ok(IpcCommand::Ping { reply }),
         ["text", "position", val] => {
             let pos = val.parse::<TextPosition>()
@@ -97,6 +99,7 @@ pub fn process_ipc_command(
     visible: &mut bool,
     opacity: &mut f32,
     config: &mut Config,
+    monitors: &[(String, bool)],
 ) {
     match cmd {
         IpcCommand::StyleNext { reply } => {
@@ -154,6 +157,16 @@ pub fn process_ipc_command(
         IpcCommand::ListColors { reply } => {
             let names: Vec<&str> = ColorScheme::all().iter().map(|c| c.name()).collect();
             let _ = reply.send(format!("ok: {}", names.join(",")));
+        }
+        IpcCommand::ListMonitors { reply } => {
+            if monitors.is_empty() {
+                let _ = reply.send("ok: (no monitors)".to_string());
+            } else {
+                let list: Vec<String> = monitors.iter().map(|(name, active)| {
+                    format!("{} ({})", name, if *active { "active" } else { "inactive" })
+                }).collect();
+                let _ = reply.send(format!("ok: {}", list.join(", ")));
+            }
         }
         IpcCommand::Ping { reply } => {
             let _ = reply.send("ok: pong".to_string());

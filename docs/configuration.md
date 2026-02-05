@@ -58,4 +58,14 @@ anchor = "fullscreen"       # fullscreen, center, top, bottom, left, right,
 # margin_right = 0
 # margin_bottom = 0
 # margin_left = 0
+multi_monitor = "clone"     # "clone" (same on all) or "independent" (per-monitor)
+# outputs = ["DP-1"]        # only show on these outputs (omit for all)
+
+# Per-monitor overrides (independent mode only):
+# [[wallpaper.monitors]]
+# output = "DP-1"
+# enabled = true
+# color_scheme = "rainbow"
+# style = "wave"
+# opacity = 0.8
 ```

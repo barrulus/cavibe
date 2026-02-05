@@ -9,7 +9,7 @@ mod ipc;
 mod metadata;
 mod visualizer;
 
-use config::{Config, FontStyle, TextAlignment, TextAnimation, TextPosition, WallpaperAnchor};
+use config::{Config, FontStyle, MultiMonitorMode, TextAlignment, TextAnimation, TextPosition, WallpaperAnchor};
 use display::DisplayMode;
 
 #[derive(Parser, Debug)]
@@ -158,6 +158,14 @@ pub struct Args {
     /// Wallpaper margin from all edges (pixels)
     #[arg(long)]
     pub wallpaper_margin: Option<i32>,
+
+    /// Only show on specific outputs (comma-separated, e.g. "DP-1,HDMI-A-1")
+    #[arg(long)]
+    pub output: Option<String>,
+
+    /// Multi-monitor mode: clone or independent
+    #[arg(long, value_enum)]
+    pub multi_monitor: Option<MultiMonitorMode>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -194,7 +202,7 @@ pub enum CtlAction {
     Status,
     /// List available options
     List {
-        /// What to list: styles, colors
+        /// What to list: styles, colors, monitors
         what: String,
     },
     /// Check if daemon is running

@@ -8,6 +8,30 @@ use std::str::FromStr;
 use crate::color::ColorScheme;
 use crate::display::DisplayMode;
 
+/// Multi-monitor display mode
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, ValueEnum, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum MultiMonitorMode {
+    #[default]
+    Clone,       // Same visualization on all monitors
+    Independent, // Per-monitor overrides allowed
+}
+
+/// Per-monitor configuration overrides
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MonitorConfig {
+    pub output: String, // Output name, e.g. "DP-1"
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub color_scheme: Option<ColorScheme>,
+    pub style: Option<String>, // Style name
+    pub opacity: Option<f32>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub display: DisplayConfig,
@@ -327,6 +351,12 @@ pub struct WallpaperConfig {
     pub margin_right: i32,
     pub margin_bottom: i32,
     pub margin_left: i32,
+    #[serde(default)]
+    pub multi_monitor: MultiMonitorMode,
+    #[serde(default)]
+    pub outputs: Option<Vec<String>>,   // CLI filter: only these outputs
+    #[serde(default)]
+    pub monitors: Vec<MonitorConfig>,   // Per-monitor overrides
 }
 
 impl Default for WallpaperConfig {
@@ -340,6 +370,9 @@ impl Default for WallpaperConfig {
             margin_right: 0,
             margin_bottom: 0,
             margin_left: 0,
+            multi_monitor: MultiMonitorMode::default(),
+            outputs: None,
+            monitors: Vec::new(),
         }
     }
 }
@@ -564,6 +597,22 @@ margin = 0
 # margin_right = 0
 # margin_bottom = 0
 # margin_left = 0
+# Multi-monitor mode: "clone" (same on all) or "independent" (per-monitor overrides)
+# multi_monitor = "clone"
+# Only show on specific outputs (by name, e.g. "DP-1"):
+# outputs = ["DP-1", "HDMI-A-1"]
+
+# Per-monitor overrides (only used in independent mode):
+# [[wallpaper.monitors]]
+# output = "DP-1"
+# enabled = true
+# color_scheme = "rainbow"
+# # style = "wave"
+# # opacity = 0.8
+#
+# [[wallpaper.monitors]]
+# output = "HDMI-A-1"
+# enabled = false
 "#
         .to_string()
     }
@@ -677,6 +726,16 @@ margin = 0
             self.wallpaper.margin_right = margin;
             self.wallpaper.margin_bottom = margin;
             self.wallpaper.margin_left = margin;
+        }
+
+        // Multi-monitor settings
+        if let Some(mode) = args.multi_monitor {
+            self.wallpaper.multi_monitor = mode;
+        }
+        if let Some(ref output) = args.output {
+            self.wallpaper.outputs = Some(
+                output.split(',').map(|s| s.trim().to_string()).collect(),
+            );
         }
     }
 }

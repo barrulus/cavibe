@@ -205,6 +205,7 @@ async fn run_direct_mode(config: Config, mut ipc_rx: mpsc::Receiver<IpcCommand>)
                 &mut visible,
                 &mut opacity,
                 &mut config,
+                &[], // No monitor info in X11/direct mode
             );
         }
 

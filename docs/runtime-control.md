@@ -15,6 +15,7 @@ cavibe ctl reload           # Reload config file
 cavibe ctl status           # Show current settings
 cavibe ctl list styles      # List available visualizer styles
 cavibe ctl list colors      # List available color schemes
+cavibe ctl list monitors    # List connected outputs and their status
 cavibe ctl ping             # Check if cavibe is running
 
 # Text controls

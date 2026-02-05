@@ -2,6 +2,10 @@
 //!
 //! Uses wlr-layer-shell protocol to render the visualizer as a desktop background
 //! on Wayland compositors like Niri, Sway, Hyprland, etc.
+//!
+//! Supports multiple monitors: one LayerSurface per output. In "clone" mode all
+//! monitors show the same visualization; in "independent" mode per-monitor
+//! overrides for color scheme, style, and opacity are applied.
 
 use anyhow::{Context, Result};
 use smithay_client_toolkit::{
@@ -22,21 +26,22 @@ use smithay_client_toolkit::{
         Shm, ShmHandler,
     },
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::info;
 use wayland_client::{
     globals::registry_queue_init,
     protocol::{wl_output, wl_shm, wl_surface},
-    Connection, QueueHandle,
+    Connection, Proxy, QueueHandle,
 };
 
 use crate::audio::{self, AudioData};
 use crate::color::ColorScheme;
-use crate::config::{Config, FontStyle, TextAlignment, TextAnimation, TextConfig, TextPosition, WallpaperAnchor};
+use crate::config::{Config, FontStyle, MultiMonitorMode, TextAlignment, TextAnimation, TextConfig, TextPosition, WallpaperAnchor};
 use crate::ipc::IpcCommand;
 use crate::metadata::{self, TrackInfo};
-use crate::visualizer::VisualizerState;
+use crate::visualizer::{VisualizerState, VISUALIZER_STYLES};
 use tokio::sync::mpsc;
 
 impl WallpaperAnchor {
@@ -72,7 +77,24 @@ struct RenderOptions<'a> {
     text_config: &'a TextConfig,
 }
 
-/// Wayland layer-shell wallpaper renderer
+/// Per-output surface state
+struct OutputSurface {
+    output_name: Option<String>,
+    layer_surface: LayerSurface,
+    pool: Option<SlotPool>,
+    width: u32,
+    height: u32,
+    configured: bool,
+    screen_width: u32,
+    screen_height: u32,
+    explicit_size: Option<(u32, u32)>,
+    // Per-monitor overrides (None = use global)
+    color_scheme_override: Option<ColorScheme>,
+    style_override: Option<usize>,
+    opacity_override: Option<f32>,
+}
+
+/// Wayland layer-shell wallpaper renderer with multi-monitor support
 struct WallpaperState {
     // Wayland state
     registry_state: RegistryState,
@@ -81,20 +103,10 @@ struct WallpaperState {
     shm: Shm,
     layer_shell: LayerShell,
 
-    // Surface state
-    layer_surface: Option<LayerSurface>,
-    pool: Option<SlotPool>,
-    width: u32,
-    height: u32,
-    configured: bool,
+    // Per-output surfaces, keyed by wl_output ObjectId
+    surfaces: HashMap<wayland_client::backend::ObjectId, OutputSurface>,
 
-    // Screen dimensions (from output)
-    screen_width: u32,
-    screen_height: u32,
-    // Explicit size from config (if any)
-    explicit_size: Option<(u32, u32)>,
-
-    // Visualizer state
+    // Shared visualizer state
     visualizer: VisualizerState,
     color_scheme: ColorScheme,
     audio_data: Arc<AudioData>,
@@ -130,14 +142,7 @@ impl WallpaperState {
             compositor_state,
             shm,
             layer_shell,
-            layer_surface: None,
-            pool: None,
-            width: 0,
-            height: 0,
-            configured: false,
-            screen_width: 0,
-            screen_height: 0,
-            explicit_size: None,
+            surfaces: HashMap::new(),
             visualizer,
             color_scheme,
             audio_data: Arc::new(AudioData::default()),
@@ -151,43 +156,102 @@ impl WallpaperState {
         }
     }
 
-    fn create_layer_surface(&mut self, qh: &QueueHandle<Self>) {
-        info!("Creating layer surface...");
+    /// Check if an output should get a surface (not filtered out)
+    fn should_create_surface(&self, output_name: &Option<String>) -> bool {
+        // Check CLI output filter
+        if let Some(ref allowed) = self.config.wallpaper.outputs {
+            if let Some(ref name) = output_name {
+                if !allowed.iter().any(|a| a == name) {
+                    return false;
+                }
+            } else {
+                // No name available, skip if filter is active
+                return false;
+            }
+        }
 
-        // Get screen dimensions from output state before creating surface
-        let (screen_w, screen_h) = self.get_screen_dimensions();
-        self.screen_width = screen_w;
-        self.screen_height = screen_h;
-        info!("Screen dimensions: {}x{}", screen_w, screen_h);
+        // Check per-monitor config for disabled outputs
+        if let Some(ref name) = output_name {
+            for monitor_cfg in &self.config.wallpaper.monitors {
+                if monitor_cfg.output == *name && !monitor_cfg.enabled {
+                    return false;
+                }
+            }
+        }
 
-        let surface = self.compositor_state.create_surface(qh);
+        true
+    }
+
+    /// Get per-monitor overrides from config
+    fn get_monitor_overrides(&self, output_name: &Option<String>) -> (Option<ColorScheme>, Option<usize>, Option<f32>) {
+        if self.config.wallpaper.multi_monitor != MultiMonitorMode::Independent {
+            return (None, None, None);
+        }
+
+        if let Some(ref name) = output_name {
+            for monitor_cfg in &self.config.wallpaper.monitors {
+                if monitor_cfg.output == *name {
+                    let style_idx = monitor_cfg.style.as_ref().and_then(|s| {
+                        VISUALIZER_STYLES.iter().position(|vs| vs.name().eq_ignore_ascii_case(s))
+                    });
+                    return (monitor_cfg.color_scheme, style_idx, monitor_cfg.opacity);
+                }
+            }
+        }
+
+        (None, None, None)
+    }
+
+    /// Create a layer surface for a specific output
+    fn create_surface_for_output(&mut self, qh: &QueueHandle<Self>, output: &wl_output::WlOutput) {
+        let output_info = self.output_state.info(output);
+        let output_name = output_info.as_ref().and_then(|i| i.name.clone());
+
+        // Check if this output should be skipped
+        if !self.should_create_surface(&output_name) {
+            info!("Skipping output {:?} (filtered)", output_name);
+            return;
+        }
+
+        // Get screen dimensions for this output
+        let (screen_w, screen_h) = output_info
+            .as_ref()
+            .and_then(|i| i.logical_size)
+            .map(|(w, h)| (w as u32, h as u32))
+            .unwrap_or((1920, 1080));
+
+        info!("Creating layer surface for output {:?} ({}x{})", output_name, screen_w, screen_h);
+
+        let wl_surface = self.compositor_state.create_surface(qh);
 
         let layer_surface = self.layer_shell.create_layer_surface(
             qh,
-            surface,
+            wl_surface,
             Layer::Background,
             Some("cavibe-wallpaper"),
-            None, // Use default output
+            Some(output),
         );
 
         // Configure anchor based on wallpaper config
         let anchor = self.config.wallpaper.anchor.to_layer_shell_anchor();
         layer_surface.set_anchor(anchor);
-        info!("Anchor set to: {:?} -> {:?}", self.config.wallpaper.anchor, anchor);
 
         // Apply margins
         let (top, right, bottom, left) = self.config.wallpaper.effective_margins();
         layer_surface.set_margin(top, right, bottom, left);
-        info!("Margins set to: top={}, right={}, bottom={}, left={}", top, right, bottom, left);
 
         // Set explicit size if configured (not fullscreen)
-        if self.config.wallpaper.anchor != WallpaperAnchor::Fullscreen {
+        let explicit_size = if self.config.wallpaper.anchor != WallpaperAnchor::Fullscreen {
             if let Some((w, h)) = self.config.wallpaper.get_size(screen_w, screen_h) {
                 layer_surface.set_size(w, h);
-                self.explicit_size = Some((w, h));
                 info!("Explicit size set to: {}x{}", w, h);
+                Some((w, h))
+            } else {
+                None
             }
-        }
+        } else {
+            None
+        };
 
         layer_surface.set_exclusive_zone(-1); // Don't reserve space
         layer_surface.set_keyboard_interactivity(KeyboardInteractivity::None);
@@ -195,48 +259,78 @@ impl WallpaperState {
         // Commit to get the configure event
         layer_surface.commit();
 
-        self.layer_surface = Some(layer_surface);
-        info!("Layer surface created, waiting for configure event...");
+        // Get per-monitor overrides
+        let (color_override, style_override, opacity_override) = self.get_monitor_overrides(&output_name);
+
+        let surface = OutputSurface {
+            output_name,
+            layer_surface,
+            pool: None,
+            width: 0,
+            height: 0,
+            configured: false,
+            screen_width: screen_w,
+            screen_height: screen_h,
+            explicit_size,
+            color_scheme_override: color_override,
+            style_override,
+            opacity_override,
+        };
+
+        self.surfaces.insert(output.id(), surface);
+        info!("Layer surface created for output, waiting for configure event...");
     }
 
-    /// Get screen dimensions from the first available output
-    fn get_screen_dimensions(&self) -> (u32, u32) {
-        for output in self.output_state.outputs() {
-            if let Some(info) = self.output_state.info(&output) {
-                if let Some((w, h)) = info.logical_size {
-                    return (w as u32, h as u32);
-                }
-            }
+    /// Create surfaces for all currently known outputs
+    fn create_surfaces_for_all_outputs(&mut self, qh: &QueueHandle<Self>) {
+        let outputs: Vec<wl_output::WlOutput> = self.output_state.outputs().collect();
+        for output in outputs {
+            self.create_surface_for_output(qh, &output);
         }
-        // Fallback if no output info available
-        (1920, 1080)
     }
 
-    fn draw(&mut self, _qh: &QueueHandle<Self>) {
-        if !self.configured || self.width == 0 || self.height == 0 {
-            return;
-        }
+    /// Check if any surface is configured
+    fn any_configured(&self) -> bool {
+        self.surfaces.values().any(|s| s.configured)
+    }
 
-        if self.layer_surface.is_none() {
+    /// Draw a specific surface by wl_surface
+    fn draw_surface(&mut self, surface_wl: &wl_surface::WlSurface) {
+        // Find the OutputSurface matching this wl_surface
+        let output_id = self.surfaces.iter()
+            .find(|(_, s)| s.layer_surface.wl_surface() == surface_wl)
+            .map(|(id, _)| id.clone());
+
+        let output_id = match output_id {
+            Some(id) => id,
+            None => return,
+        };
+
+        let surface = match self.surfaces.get_mut(&output_id) {
+            Some(s) => s,
+            None => return,
+        };
+
+        if !surface.configured || surface.width == 0 || surface.height == 0 {
             return;
         }
 
         if !self.visible {
             // Render a fully transparent frame
-            if self.pool.is_none() {
+            if surface.pool.is_none() {
                 let pool = SlotPool::new(
-                    (self.width * self.height * 4) as usize,
+                    (surface.width * surface.height * 4) as usize,
                     &self.shm,
                 )
                 .expect("Failed to create slot pool");
-                self.pool = Some(pool);
+                surface.pool = Some(pool);
             }
-            let pool = self.pool.as_mut().unwrap();
+            let pool = surface.pool.as_mut().unwrap();
             let (buffer, canvas) = pool
                 .create_buffer(
-                    self.width as i32,
-                    self.height as i32,
-                    (self.width * 4) as i32,
+                    surface.width as i32,
+                    surface.height as i32,
+                    (surface.width * 4) as i32,
                     wl_shm::Format::Argb8888,
                 )
                 .expect("Failed to create buffer");
@@ -246,58 +340,59 @@ impl WallpaperState {
                 pixel[2] = 0;
                 pixel[3] = 0;
             }
-            let layer_surface = self.layer_surface.as_ref().unwrap();
-            let surface = layer_surface.wl_surface();
-            buffer.attach_to(surface).expect("Failed to attach buffer");
-            surface.damage_buffer(0, 0, self.width as i32, self.height as i32);
-            surface.commit();
+            let wl_surf = surface.layer_surface.wl_surface();
+            buffer.attach_to(wl_surf).expect("Failed to attach buffer");
+            wl_surf.damage_buffer(0, 0, surface.width as i32, surface.height as i32);
+            wl_surf.commit();
             return;
         }
 
         // Ensure we have a pool
-        if self.pool.is_none() {
+        if surface.pool.is_none() {
             let pool = SlotPool::new(
-                (self.width * self.height * 4) as usize,
+                (surface.width * surface.height * 4) as usize,
                 &self.shm,
             )
             .expect("Failed to create slot pool");
-            self.pool = Some(pool);
+            surface.pool = Some(pool);
         }
 
-        let pool = self.pool.as_mut().unwrap();
+        let pool = surface.pool.as_mut().unwrap();
 
         // Get a buffer from the pool
         let (buffer, canvas) = pool
             .create_buffer(
-                self.width as i32,
-                self.height as i32,
-                (self.width * 4) as i32,
+                surface.width as i32,
+                surface.height as i32,
+                (surface.width * 4) as i32,
                 wl_shm::Format::Argb8888,
             )
             .expect("Failed to create buffer");
 
+        // Resolve per-surface overrides
+        let color_scheme = surface.color_scheme_override.unwrap_or(self.color_scheme);
+        let style = surface.style_override.unwrap_or(self.visualizer.current_style);
+        let opacity = surface.opacity_override.unwrap_or(self.config.visualizer.opacity);
+
         // Render the visualizer to the canvas
-        // Extract values needed for rendering to avoid borrow issues
-        let width = self.width as usize;
-        let height = self.height as usize;
+        let width = surface.width as usize;
+        let height = surface.height as usize;
         let frequencies = self.audio_data.frequencies.clone();
         let intensity = self.audio_data.intensity;
         let track_title = self.track_info.title.clone();
         let track_artist = self.track_info.artist.clone();
-        let color_scheme = self.color_scheme;
-        // Scale bar dimensions for pixel rendering (config values are for terminal chars ~8-10px)
         let pixel_scale = 8;
         let bar_width = (self.config.visualizer.bar_width as usize) * pixel_scale;
         let bar_spacing = (self.config.visualizer.bar_spacing as usize) * pixel_scale;
         let time = self.time;
 
         let render_opts = RenderOptions {
-            style: self.visualizer.current_style,
+            style,
             bar_width,
             bar_spacing,
             mirror: self.config.visualizer.mirror,
             reverse_mirror: self.config.visualizer.reverse_mirror,
-            opacity: self.config.visualizer.opacity,
+            opacity,
             color_scheme: &color_scheme,
             text_config: &self.config.text,
         };
@@ -315,11 +410,23 @@ impl WallpaperState {
         );
 
         // Attach and commit
-        let layer_surface = self.layer_surface.as_ref().unwrap();
-        let surface = layer_surface.wl_surface();
-        buffer.attach_to(surface).expect("Failed to attach buffer");
-        surface.damage_buffer(0, 0, self.width as i32, self.height as i32);
-        surface.commit();
+        let wl_surf = surface.layer_surface.wl_surface();
+        buffer.attach_to(wl_surf).expect("Failed to attach buffer");
+        wl_surf.damage_buffer(0, 0, surface.width as i32, surface.height as i32);
+        wl_surf.commit();
+    }
+
+    /// Get a list of connected monitor names and their status
+    pub fn list_monitors(&self) -> Vec<(String, bool)> {
+        let mut result = Vec::new();
+        for output in self.output_state.outputs() {
+            let name = self.output_state.info(&output)
+                .and_then(|i| i.name.clone())
+                .unwrap_or_else(|| format!("unknown-{}", output.id()));
+            let has_surface = self.surfaces.contains_key(&output.id());
+            result.push((name, has_surface));
+        }
+        result
     }
 
     fn update(&mut self, dt: f32) {
@@ -1018,11 +1125,11 @@ impl CompositorHandler for WallpaperState {
     fn frame(
         &mut self,
         _conn: &Connection,
-        qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
+        _qh: &QueueHandle<Self>,
+        surface: &wl_surface::WlSurface,
         _time: u32,
     ) {
-        self.draw(qh);
+        self.draw_surface(surface);
     }
 
     fn surface_enter(
@@ -1052,9 +1159,11 @@ impl OutputHandler for WallpaperState {
     fn new_output(
         &mut self,
         _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _output: wl_output::WlOutput,
+        qh: &QueueHandle<Self>,
+        output: wl_output::WlOutput,
     ) {
+        // Dynamically create a surface for the new output (hotplug)
+        self.create_surface_for_output(qh, &output);
     }
 
     fn update_output(
@@ -1069,8 +1178,13 @@ impl OutputHandler for WallpaperState {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _output: wl_output::WlOutput,
+        output: wl_output::WlOutput,
     ) {
+        // Remove the surface for the destroyed output (hotplug unplug)
+        if let Some(surface) = self.surfaces.remove(&output.id()) {
+            info!("Output {:?} destroyed, removing surface", surface.output_name);
+            // LayerSurface is dropped here, cleaning up Wayland resources
+        }
     }
 }
 
@@ -1089,37 +1203,51 @@ impl LayerShellHandler for WallpaperState {
     ) {
         let (suggested_width, suggested_height) = configure.new_size;
 
+        // Find the OutputSurface matching this layer surface
+        let output_id = self.surfaces.iter()
+            .find(|(_, s)| &s.layer_surface == layer)
+            .map(|(id, _)| id.clone());
+
+        let output_id = match output_id {
+            Some(id) => id,
+            None => return,
+        };
+
+        let surface = match self.surfaces.get_mut(&output_id) {
+            Some(s) => s,
+            None => return,
+        };
+
         // Use explicit size if configured, otherwise use compositor suggestion
-        let (width, height) = if let Some((w, h)) = self.explicit_size {
-            // Use our explicit size, but respect compositor's suggestion if it's larger
-            // (compositor may have constraints)
+        let (width, height) = if let Some((w, h)) = surface.explicit_size {
             if suggested_width > 0 && suggested_height > 0 {
                 (suggested_width.min(w), suggested_height.min(h))
             } else {
                 (w, h)
             }
         } else {
-            // No explicit size - use compositor suggestion or fallback
-            let w = if suggested_width > 0 { suggested_width } else { self.screen_width.max(1920) };
-            let h = if suggested_height > 0 { suggested_height } else { self.screen_height.max(1080) };
+            let w = if suggested_width > 0 { suggested_width } else { surface.screen_width.max(1920) };
+            let h = if suggested_height > 0 { suggested_height } else { surface.screen_height.max(1080) };
             (w, h)
         };
 
-        self.width = width;
-        self.height = height;
+        surface.width = width;
+        surface.height = height;
 
-        info!("Layer surface configured: {}x{} (suggested: {}x{}, explicit: {:?})",
-              self.width, self.height, suggested_width, suggested_height, self.explicit_size);
+        info!("Layer surface configured for {:?}: {}x{} (suggested: {}x{}, explicit: {:?})",
+              surface.output_name, surface.width, surface.height, suggested_width, suggested_height, surface.explicit_size);
 
         // Recreate the pool for new size
-        self.pool = None;
-        self.configured = true;
+        surface.pool = None;
+        surface.configured = true;
 
         // Request frame callback for animation
-        layer.wl_surface().frame(qh, layer.wl_surface().clone());
+        let wl_surface = layer.wl_surface();
+        wl_surface.frame(qh, wl_surface.clone());
 
         // Initial draw
-        self.draw(qh);
+        let wl_surface_clone = wl_surface.clone();
+        self.draw_surface(&wl_surface_clone);
     }
 }
 
@@ -1176,31 +1304,38 @@ pub async fn run(config: Config, ipc_rx: mpsc::Receiver<IpcCommand>) -> Result<(
         ipc_rx,
     );
 
-    // Create the layer surface
-    state.create_layer_surface(&qh);
-
-    // Do a roundtrip to ensure the layer surface gets configured
+    // Do an initial roundtrip to discover outputs
     event_queue
         .roundtrip(&mut state)
         .context("Failed initial Wayland roundtrip")?;
 
-    // Wait for layer surface to be configured (handles race at compositor startup)
+    // Create layer surfaces for all known outputs
+    state.create_surfaces_for_all_outputs(&qh);
+
+    // Do another roundtrip to get configure events
+    event_queue
+        .roundtrip(&mut state)
+        .context("Failed Wayland roundtrip after surface creation")?;
+
+    // Wait for at least one surface to be configured
     let start = Instant::now();
     let timeout = Duration::from_secs(30);
-    while !state.configured && start.elapsed() < timeout {
+    while !state.any_configured() && start.elapsed() < timeout {
         event_queue
             .roundtrip(&mut state)
             .context("Wayland roundtrip failed while waiting for configure")?;
-        if !state.configured {
+        if !state.any_configured() {
             std::thread::sleep(Duration::from_millis(100));
         }
     }
 
-    if !state.configured {
-        anyhow::bail!("Layer surface was not configured within 30 seconds - compositor may not support wlr-layer-shell or no outputs available");
+    if !state.any_configured() {
+        anyhow::bail!("No layer surface was configured within 30 seconds - compositor may not support wlr-layer-shell or no outputs available");
     }
 
-    info!("Layer surface configured successfully");
+    let configured_count = state.surfaces.values().filter(|s| s.configured).count();
+    let total_count = state.surfaces.len();
+    info!("Layer surfaces configured: {}/{} outputs", configured_count, total_count);
 
     // Start audio capture
     let (_audio_capture, audio_rx) = audio::create_audio_pipeline(
@@ -1249,6 +1384,7 @@ pub async fn run(config: Config, ipc_rx: mpsc::Receiver<IpcCommand>) -> Result<(
         // Process IPC commands (non-blocking)
         while let Ok(cmd) = state.ipc_rx.try_recv() {
             let mut opacity = state.config.visualizer.opacity;
+            let monitors = state.list_monitors();
             crate::ipc::process_ipc_command(
                 cmd,
                 &mut state.visualizer,
@@ -1256,6 +1392,7 @@ pub async fn run(config: Config, ipc_rx: mpsc::Receiver<IpcCommand>) -> Result<(
                 &mut state.visible,
                 &mut opacity,
                 &mut state.config,
+                &monitors,
             );
             state.config.visualizer.opacity = opacity;
         }
@@ -1283,11 +1420,15 @@ pub async fn run(config: Config, ipc_rx: mpsc::Receiver<IpcCommand>) -> Result<(
             .dispatch_pending(&mut state)
             .context("Wayland dispatch failed")?;
 
-        // Request next frame and draw if configured
-        if state.configured {
-            if let Some(ref layer_surface) = state.layer_surface {
-                layer_surface.wl_surface().frame(&qh, layer_surface.wl_surface().clone());
-                state.draw(&qh);
+        // Request next frame and draw for all configured surfaces
+        let surface_ids: Vec<_> = state.surfaces.keys().cloned().collect();
+        for output_id in surface_ids {
+            if let Some(surface) = state.surfaces.get(&output_id) {
+                if surface.configured {
+                    let wl_surface = surface.layer_surface.wl_surface().clone();
+                    wl_surface.frame(&qh, wl_surface.clone());
+                    state.draw_surface(&wl_surface);
+                }
             }
         }
 
