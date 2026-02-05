@@ -60,6 +60,7 @@ impl WallpaperAnchor {
 /// Options for rendering the visualizer
 struct RenderOptions<'a> {
     // Visualizer settings
+    style: usize,
     bar_width: usize,
     bar_spacing: usize,
     mirror: bool,
@@ -291,6 +292,7 @@ impl WallpaperState {
         let time = self.time;
 
         let render_opts = RenderOptions {
+            style: self.visualizer.current_style,
             bar_width,
             bar_spacing,
             mirror: self.config.visualizer.mirror,
@@ -353,19 +355,39 @@ fn render_to_buffer(
     render_text(canvas, width, height, track_title, track_artist, intensity, time, opts);
 }
 
-fn render_bars(
-    canvas: &mut [u8],
+/// Write a pixel to the canvas with pre-multiplied alpha
+#[inline]
+fn put_pixel(canvas: &mut [u8], width: usize, x: usize, y: usize, r: u8, g: u8, b: u8, opacity: f32) {
+    let idx = (y * width + x) * 4;
+    if idx + 3 < canvas.len() {
+        canvas[idx] = (b as f32 * opacity) as u8;
+        canvas[idx + 1] = (g as f32 * opacity) as u8;
+        canvas[idx + 2] = (r as f32 * opacity) as u8;
+        canvas[idx + 3] = (opacity * 255.0) as u8;
+    }
+}
+
+/// Compute bar layout shared by all styles: text area, slot dimensions, frequency mapping
+struct BarLayout {
+    bars_y_start: usize,
+    bars_height: usize,
+    start_x: usize,
+    slot_width: usize,
+    displayable: usize,
+    render_frequencies: Vec<f32>,
+}
+
+fn compute_bar_layout(
     width: usize,
     height: usize,
     frequencies: &[f32],
     opts: &RenderOptions,
-) {
+) -> Option<BarLayout> {
     if frequencies.is_empty() {
-        return;
+        return None;
     }
 
     let bar_count = frequencies.len().min(width);
-    // Reserve space for text based on position
     let text_height = if opts.text_config.show_title || opts.text_config.show_artist {
         60 + opts.text_config.margin_top as usize + opts.text_config.margin_bottom as usize
     } else {
@@ -375,39 +397,32 @@ fn render_bars(
     let (bars_y_start, bars_height) = match opts.text_config.position {
         TextPosition::Top => (text_height, height.saturating_sub(text_height)),
         TextPosition::Bottom => (0, height.saturating_sub(text_height)),
-        TextPosition::Center => (0, height), // Text overlays bars
+        TextPosition::Center => (0, height),
     };
 
     if bars_height == 0 {
-        return;
+        return None;
     }
 
     let slot_width = opts.bar_width + opts.bar_spacing;
-
-    // Calculate how many bars fit
     let max_bars = width / slot_width.max(1);
     let displayable = max_bars.min(bar_count);
 
     if displayable == 0 {
-        return;
+        return None;
     }
 
-    // Center the bars
     let total_width = displayable * slot_width;
     let start_x = (width.saturating_sub(total_width)) / 2;
 
-    // Prepare frequency data based on mirror and reverse settings
     let render_frequencies: Vec<f32> = match (opts.mirror, opts.reverse_mirror) {
         (true, true) => {
-            // Mirror + Reverse: lows meet in middle, highs on outside
             let half = displayable / 2;
             let mut result = Vec::with_capacity(displayable);
-            // Left side: high to low (highs on outside)
             for i in 0..half {
                 let freq_idx = ((half - 1 - i) * frequencies.len()) / half.max(1);
                 result.push(frequencies[freq_idx.min(frequencies.len() - 1)]);
             }
-            // Right side: low to high (mirrored, highs on outside)
             for i in 0..displayable - half {
                 let freq_idx = (i * frequencies.len()) / (displayable - half).max(1);
                 result.push(frequencies[freq_idx.min(frequencies.len() - 1)]);
@@ -415,15 +430,12 @@ fn render_bars(
             result
         }
         (true, false) => {
-            // Mirror only: highs meet in middle, lows on outside
             let half = displayable / 2;
             let mut result = Vec::with_capacity(displayable);
-            // Left side: low to high (lows on outside)
             for i in 0..half {
                 let freq_idx = (i * frequencies.len()) / half.max(1);
                 result.push(frequencies[freq_idx.min(frequencies.len() - 1)]);
             }
-            // Right side: high to low (mirrored, lows on outside)
             for i in 0..displayable - half {
                 let freq_idx = ((displayable - half - 1 - i) * frequencies.len()) / (displayable - half).max(1);
                 result.push(frequencies[freq_idx.min(frequencies.len() - 1)]);
@@ -431,7 +443,6 @@ fn render_bars(
             result
         }
         (false, true) => {
-            // Reverse only: high frequencies on left, low on right
             (0..displayable)
                 .map(|i| {
                     let freq_idx = ((displayable - 1 - i) * frequencies.len()) / displayable.max(1);
@@ -440,7 +451,6 @@ fn render_bars(
                 .collect()
         }
         (false, false) => {
-            // Normal: low frequencies on left, high on right
             (0..displayable)
                 .map(|i| {
                     let freq_idx = (i * frequencies.len()) / displayable.max(1);
@@ -450,29 +460,238 @@ fn render_bars(
         }
     };
 
-    for i in 0..displayable {
-        let magnitude = render_frequencies[i];
+    Some(BarLayout { bars_y_start, bars_height, start_x, slot_width, displayable, render_frequencies })
+}
 
-        let bar_height = (magnitude * bars_height as f32) as usize;
-        let x_start = start_x + i * slot_width;
-        let position = i as f32 / displayable as f32;
+fn render_bars(
+    canvas: &mut [u8],
+    width: usize,
+    height: usize,
+    frequencies: &[f32],
+    opts: &RenderOptions,
+) {
+    let layout = match compute_bar_layout(width, height, frequencies, opts) {
+        Some(l) => l,
+        None => return,
+    };
 
-        // Draw bar from bottom up
-        for y_offset in 0..bar_height.min(bars_height) {
-            let y = bars_y_start + bars_height - 1 - y_offset;
-            let intensity = y_offset as f32 / bars_height as f32;
+    match opts.style {
+        1 => render_bars_mirrored(canvas, width, height, &layout, opts),
+        2 => render_bars_wave(canvas, width, height, &layout, opts),
+        3 => render_bars_dots(canvas, width, height, &layout, opts),
+        4 => render_bars_blocks(canvas, width, height, &layout, opts),
+        _ => render_bars_classic(canvas, width, height, &layout, opts),
+    }
+}
+
+/// Style 0: Classic vertical bars from bottom
+fn render_bars_classic(
+    canvas: &mut [u8],
+    width: usize,
+    height: usize,
+    layout: &BarLayout,
+    opts: &RenderOptions,
+) {
+    for i in 0..layout.displayable {
+        let magnitude = layout.render_frequencies[i];
+        let bar_height = (magnitude * layout.bars_height as f32) as usize;
+        let x_start = layout.start_x + i * layout.slot_width;
+        let position = i as f32 / layout.displayable as f32;
+
+        for y_offset in 0..bar_height.min(layout.bars_height) {
+            let y = layout.bars_y_start + layout.bars_height - 1 - y_offset;
+            let intensity = y_offset as f32 / layout.bars_height as f32;
             let (r, g, b) = opts.color_scheme.get_color(position, intensity);
 
             for bx in 0..opts.bar_width {
                 let x = x_start + bx;
                 if x < width && y < height {
-                    let idx = (y * width + x) * 4;
-                    if idx + 3 < canvas.len() {
-                        // Pre-multiplied alpha: RGB values must be multiplied by alpha
-                        canvas[idx] = (b as f32 * opts.opacity) as u8;     // B
-                        canvas[idx + 1] = (g as f32 * opts.opacity) as u8; // G
-                        canvas[idx + 2] = (r as f32 * opts.opacity) as u8; // R
-                        canvas[idx + 3] = (opts.opacity * 255.0) as u8;    // A
+                    put_pixel(canvas, width, x, y, r, g, b, opts.opacity);
+                }
+            }
+        }
+    }
+}
+
+/// Style 1: Mirrored bars growing from center
+fn render_bars_mirrored(
+    canvas: &mut [u8],
+    width: usize,
+    height: usize,
+    layout: &BarLayout,
+    opts: &RenderOptions,
+) {
+    let center_y = layout.bars_y_start + layout.bars_height / 2;
+
+    for i in 0..layout.displayable {
+        let magnitude = layout.render_frequencies[i];
+        let half_height = (magnitude * layout.bars_height as f32 / 2.0) as usize;
+        let x_start = layout.start_x + i * layout.slot_width;
+        let position = i as f32 / layout.displayable as f32;
+
+        for y_offset in 0..half_height.min(layout.bars_height / 2) {
+            let intensity = y_offset as f32 / (layout.bars_height as f32 / 2.0);
+            let (r, g, b) = opts.color_scheme.get_color(position, intensity);
+
+            // Upper half
+            let y_up = center_y.saturating_sub(y_offset);
+            if y_up >= layout.bars_y_start {
+                for bx in 0..opts.bar_width {
+                    let x = x_start + bx;
+                    if x < width && y_up < height {
+                        put_pixel(canvas, width, x, y_up, r, g, b, opts.opacity);
+                    }
+                }
+            }
+
+            // Lower half
+            let y_down = center_y + y_offset;
+            if y_down < layout.bars_y_start + layout.bars_height {
+                for bx in 0..opts.bar_width {
+                    let x = x_start + bx;
+                    if x < width && y_down < height {
+                        put_pixel(canvas, width, x, y_down, r, g, b, opts.opacity);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Style 2: Wave centered on middle row
+fn render_bars_wave(
+    canvas: &mut [u8],
+    width: usize,
+    height: usize,
+    layout: &BarLayout,
+    opts: &RenderOptions,
+) {
+    let center_y = layout.bars_y_start + layout.bars_height / 2;
+    // Use a narrower bar for wave style
+    let wave_width = (opts.bar_width / 3).max(1);
+
+    for i in 0..layout.displayable {
+        let magnitude = layout.render_frequencies[i];
+        let wave_height = (magnitude * layout.bars_height as f32 / 2.0) as isize;
+        let x_start = layout.start_x + i * layout.slot_width;
+        let position = i as f32 / layout.displayable as f32;
+
+        for offset in -wave_height..=wave_height {
+            let y = (center_y as isize + offset) as usize;
+            if y >= layout.bars_y_start && y < layout.bars_y_start + layout.bars_height && y < height {
+                let intensity = 1.0 - (offset.unsigned_abs() as f32 / wave_height.max(1) as f32);
+                let (r, g, b) = opts.color_scheme.get_color(position, intensity);
+
+                for bx in 0..wave_width {
+                    let x = x_start + bx;
+                    if x < width {
+                        put_pixel(canvas, width, x, y, r, g, b, opts.opacity * intensity);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Style 3: Dots at peak with trailing dots below
+fn render_bars_dots(
+    canvas: &mut [u8],
+    width: usize,
+    height: usize,
+    layout: &BarLayout,
+    opts: &RenderOptions,
+) {
+    let dot_radius = (opts.bar_width / 3).max(2);
+
+    for i in 0..layout.displayable {
+        let magnitude = layout.render_frequencies[i];
+        let peak_y = layout.bars_y_start + layout.bars_height - 1
+            - (magnitude * (layout.bars_height - 1) as f32) as usize;
+        let x_center = layout.start_x + i * layout.slot_width + opts.bar_width / 2;
+        let position = i as f32 / layout.displayable as f32;
+        let (r, g, b) = opts.color_scheme.get_color(position, magnitude);
+
+        // Draw dot (filled circle)
+        let r2 = (dot_radius * dot_radius) as isize;
+        for dy in -(dot_radius as isize)..=(dot_radius as isize) {
+            for dx in -(dot_radius as isize)..=(dot_radius as isize) {
+                if dx * dx + dy * dy <= r2 {
+                    let x = (x_center as isize + dx) as usize;
+                    let y = (peak_y as isize + dy) as usize;
+                    if x < width && y >= layout.bars_y_start && y < layout.bars_y_start + layout.bars_height && y < height {
+                        put_pixel(canvas, width, x, y, r, g, b, opts.opacity);
+                    }
+                }
+            }
+        }
+
+        // Draw trail below dot
+        let trail_width = (opts.bar_width / 4).max(1);
+        let trail_start = peak_y + dot_radius + 1;
+        let trail_end = layout.bars_y_start + layout.bars_height;
+        for y in trail_start..trail_end {
+            let trail_intensity = 1.0 - ((y - trail_start) as f32 / (layout.bars_height as f32 / 2.0));
+            if trail_intensity <= 0.0 {
+                break;
+            }
+            let (tr, tg, tb) = opts.color_scheme.get_color(position, trail_intensity * magnitude);
+            for bx in 0..trail_width {
+                let x = x_center - trail_width / 2 + bx;
+                if x < width && y < height {
+                    put_pixel(canvas, width, x, y, tr, tg, tb, opts.opacity * trail_intensity);
+                }
+            }
+        }
+    }
+}
+
+/// Style 4: Blocks with gradient fade at top edge
+fn render_bars_blocks(
+    canvas: &mut [u8],
+    width: usize,
+    height: usize,
+    layout: &BarLayout,
+    opts: &RenderOptions,
+) {
+    let fade_height = (opts.bar_width / 2).max(2);
+
+    for i in 0..layout.displayable {
+        let magnitude = layout.render_frequencies[i];
+        let bar_height_f = magnitude * layout.bars_height as f32;
+        let bar_height = bar_height_f as usize;
+        let fractional = bar_height_f - bar_height as f32;
+        let x_start = layout.start_x + i * layout.slot_width;
+        let position = i as f32 / layout.displayable as f32;
+
+        // Draw solid portion
+        for y_offset in 0..bar_height.min(layout.bars_height) {
+            let y = layout.bars_y_start + layout.bars_height - 1 - y_offset;
+            let intensity = y_offset as f32 / layout.bars_height as f32;
+            let (r, g, b) = opts.color_scheme.get_color(position, intensity);
+
+            for bx in 0..opts.bar_width {
+                let x = x_start + bx;
+                if x < width && y < height {
+                    put_pixel(canvas, width, x, y, r, g, b, opts.opacity);
+                }
+            }
+        }
+
+        // Draw gradient fade at top edge
+        if bar_height < layout.bars_height {
+            let top_y = layout.bars_y_start + layout.bars_height - 1 - bar_height;
+            let intensity = bar_height as f32 / layout.bars_height as f32;
+            let (r, g, b) = opts.color_scheme.get_color(position, intensity);
+
+            for fy in 0..fade_height.min(top_y.saturating_sub(layout.bars_y_start)) {
+                let y = top_y - fy;
+                let fade = fractional * (1.0 - fy as f32 / fade_height as f32);
+                if y < height {
+                    for bx in 0..opts.bar_width {
+                        let x = x_start + bx;
+                        if x < width {
+                            put_pixel(canvas, width, x, y, r, g, b, opts.opacity * fade);
+                        }
                     }
                 }
             }

@@ -285,8 +285,8 @@ fn render_frame(
     let text_height = 3u16;
     let bars_height = height.saturating_sub(text_height);
 
-    // Render bars
-    render_bars_direct(stdout, offset_x, offset_y, width, bars_height, audio, color_scheme, &visualizer.visualizer_config)?;
+    // Render bars with current style
+    render_bars_direct(stdout, offset_x, offset_y, width, bars_height, audio, color_scheme, &visualizer.visualizer_config, visualizer.current_style)?;
 
     // Render text area
     render_text_direct(stdout, offset_x, offset_y + bars_height, width, text_height, track, audio, color_scheme, visualizer.time)?;
@@ -305,6 +305,7 @@ fn render_bars_direct(
     audio: &Arc<AudioData>,
     color_scheme: &ColorScheme,
     config: &VisualizerConfig,
+    style: usize,
 ) -> Result<()> {
     if width == 0 || height == 0 || audio.frequencies.is_empty() {
         return Ok(());
@@ -312,49 +313,229 @@ fn render_bars_direct(
 
     let bar_count = audio.frequencies.len().min(width as usize);
 
+    // Clear the entire bar area first
+    for row in 0..height {
+        for col in 0..width {
+            execute!(
+                stdout,
+                MoveTo(x + col, y + row),
+                SetBackgroundColor(Color::Reset),
+                Print(" ")
+            )?;
+        }
+    }
+
+    match style {
+        1 => render_direct_mirrored(stdout, x, y, width, height, audio, color_scheme, config, bar_count),
+        2 => render_direct_wave(stdout, x, y, width, height, audio, color_scheme, config, bar_count),
+        3 => render_direct_dots(stdout, x, y, width, height, audio, color_scheme, config, bar_count),
+        4 => render_direct_blocks(stdout, x, y, width, height, audio, color_scheme, config, bar_count),
+        _ => render_direct_classic(stdout, x, y, width, height, audio, color_scheme, config, bar_count),
+    }
+}
+
+/// Style 0: Classic vertical bars from bottom
+fn render_direct_classic(
+    stdout: &mut impl Write,
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16,
+    audio: &Arc<AudioData>,
+    color_scheme: &ColorScheme,
+    config: &VisualizerConfig,
+    bar_count: usize,
+) -> Result<()> {
     for (i, &magnitude) in audio.frequencies.iter().take(bar_count).enumerate() {
         let bar_height = (magnitude * height as f32) as u16;
-
-        // Calculate bar position and width using integer math for even spacing
         let x_start = bar_x_position(i, bar_count, width);
         let x_end = bar_x_position(i + 1, bar_count, width);
         let slot_width = (x_end - x_start).max(1);
-
         let bar_x = x + x_start;
         let position = i as f32 / bar_count as f32;
-
-        // Use config ratio for bar vs spacing
         let draw_width = calculate_bar_dimensions(slot_width, config);
 
-        // Clear column first
-        for bx in 0..draw_width {
-            for row in 0..height {
-                execute!(
-                    stdout,
-                    MoveTo(bar_x + bx, y + row),
-                    SetBackgroundColor(Color::Reset),
-                    Print(" ")
-                )?;
-            }
-        }
-
-        // Draw bar from bottom
         for offset in 0..bar_height.min(height) {
             let row = y + height - 1 - offset;
             let intensity = offset as f32 / height as f32;
             let (r, g, b) = color_scheme.get_color(position, intensity);
 
             for bx in 0..draw_width {
-                execute!(
-                    stdout,
-                    MoveTo(bar_x + bx, row),
-                    SetForegroundColor(Color::Rgb { r, g, b }),
-                    Print("█")
-                )?;
+                execute!(stdout, MoveTo(bar_x + bx, row), SetForegroundColor(Color::Rgb { r, g, b }), Print("█"))?;
             }
         }
     }
+    Ok(())
+}
 
+/// Style 1: Mirrored bars growing from center
+fn render_direct_mirrored(
+    stdout: &mut impl Write,
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16,
+    audio: &Arc<AudioData>,
+    color_scheme: &ColorScheme,
+    config: &VisualizerConfig,
+    bar_count: usize,
+) -> Result<()> {
+    let center = y + height / 2;
+
+    for (i, &magnitude) in audio.frequencies.iter().take(bar_count).enumerate() {
+        let half_height = (magnitude * height as f32 / 2.0) as u16;
+        let x_start = bar_x_position(i, bar_count, width);
+        let x_end = bar_x_position(i + 1, bar_count, width);
+        let slot_width = (x_end - x_start).max(1);
+        let bar_x = x + x_start;
+        let position = i as f32 / bar_count as f32;
+        let draw_width = calculate_bar_dimensions(slot_width, config);
+
+        for offset in 0..half_height.min(height / 2) {
+            let intensity = offset as f32 / (height as f32 / 2.0);
+            let (r, g, b) = color_scheme.get_color(position, intensity);
+
+            // Upper half
+            let row_up = center.saturating_sub(offset);
+            if row_up >= y {
+                for bx in 0..draw_width {
+                    execute!(stdout, MoveTo(bar_x + bx, row_up), SetForegroundColor(Color::Rgb { r, g, b }), Print("█"))?;
+                }
+            }
+
+            // Lower half
+            let row_down = center + offset;
+            if row_down < y + height {
+                for bx in 0..draw_width {
+                    execute!(stdout, MoveTo(bar_x + bx, row_down), SetForegroundColor(Color::Rgb { r, g, b }), Print("█"))?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Style 2: Wave lines centered on middle row
+fn render_direct_wave(
+    stdout: &mut impl Write,
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16,
+    audio: &Arc<AudioData>,
+    color_scheme: &ColorScheme,
+    _config: &VisualizerConfig,
+    bar_count: usize,
+) -> Result<()> {
+    let center = y + height / 2;
+
+    for (i, &magnitude) in audio.frequencies.iter().take(bar_count).enumerate() {
+        let wave_height = (magnitude * (height as f32 / 2.0)) as i16;
+        let col = x + bar_x_position(i, bar_count, width);
+        if col >= x + width {
+            break;
+        }
+        let position = i as f32 / bar_count as f32;
+
+        for offset in -wave_height..=wave_height {
+            let row = (center as i16 + offset) as u16;
+            if row >= y && row < y + height {
+                let intensity = 1.0 - (offset.unsigned_abs() as f32 / wave_height.max(1) as f32);
+                let (r, g, b) = color_scheme.get_color(position, intensity);
+                execute!(stdout, MoveTo(col, row), SetForegroundColor(Color::Rgb { r, g, b }), Print("│"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Style 3: Dots at peak with trailing dots below
+fn render_direct_dots(
+    stdout: &mut impl Write,
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16,
+    audio: &Arc<AudioData>,
+    color_scheme: &ColorScheme,
+    _config: &VisualizerConfig,
+    bar_count: usize,
+) -> Result<()> {
+    for (i, &magnitude) in audio.frequencies.iter().take(bar_count).enumerate() {
+        let col = x + bar_x_position(i, bar_count, width);
+        if col >= x + width {
+            break;
+        }
+        let position = i as f32 / bar_count as f32;
+        let dot_y = y + height - 1 - (magnitude * (height - 1) as f32) as u16;
+
+        // Draw dot
+        if dot_y >= y && dot_y < y + height {
+            let (r, g, b) = color_scheme.get_color(position, magnitude);
+            execute!(stdout, MoveTo(col, dot_y), SetForegroundColor(Color::Rgb { r, g, b }), Print("●"))?;
+        }
+
+        // Draw trail
+        for trail_y in (dot_y + 1)..(y + height) {
+            let trail_intensity = 1.0 - ((trail_y - dot_y) as f32 / (height as f32 / 2.0));
+            if trail_intensity <= 0.0 {
+                break;
+            }
+            let (r, g, b) = color_scheme.get_color(position, trail_intensity * magnitude);
+            execute!(stdout, MoveTo(col, trail_y), SetForegroundColor(Color::Rgb { r, g, b }), Print("·"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Style 4: Blocks with partial unicode block characters
+fn render_direct_blocks(
+    stdout: &mut impl Write,
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16,
+    audio: &Arc<AudioData>,
+    color_scheme: &ColorScheme,
+    config: &VisualizerConfig,
+    bar_count: usize,
+) -> Result<()> {
+    let block_chars = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+    for (i, &magnitude) in audio.frequencies.iter().take(bar_count).enumerate() {
+        let x_start = bar_x_position(i, bar_count, width);
+        let x_end = bar_x_position(i + 1, bar_count, width);
+        let slot_width = (x_end - x_start).max(1);
+        let bar_x = x + x_start;
+        let position = i as f32 / bar_count as f32;
+        let draw_width = calculate_bar_dimensions(slot_width, config);
+
+        let full_blocks = (magnitude * height as f32) as u16;
+        let partial = ((magnitude * height as f32) % 1.0 * 8.0) as usize;
+
+        // Draw full blocks
+        for b in 0..full_blocks.min(height) {
+            let row = y + height - 1 - b;
+            let intensity = b as f32 / height as f32;
+            let (r, g, b) = color_scheme.get_color(position, intensity);
+
+            for bx in 0..draw_width {
+                execute!(stdout, MoveTo(bar_x + bx, row), SetForegroundColor(Color::Rgb { r, g, b }), Print("█"))?;
+            }
+        }
+
+        // Draw partial block on top
+        if full_blocks < height && partial > 0 {
+            let row = y + height - 1 - full_blocks;
+            let intensity = full_blocks as f32 / height as f32;
+            let (r, g, b) = color_scheme.get_color(position, intensity);
+            let ch = block_chars[partial.min(7)];
+
+            for bx in 0..draw_width {
+                execute!(stdout, MoveTo(bar_x + bx, row), SetForegroundColor(Color::Rgb { r, g, b }), Print(ch))?;
+            }
+        }
+    }
     Ok(())
 }
 
