@@ -24,29 +24,77 @@ impl Drop for AudioCapture {
     }
 }
 
-/// List available PulseAudio/PipeWire sources.
+/// List available PulseAudio/PipeWire sources via the native libpulse API.
 ///
-/// Returns a list of `(name, state)` tuples parsed from `pactl list short sources`.
+/// Returns a list of `(name, state)` tuples.
 pub fn list_sources() -> Result<Vec<(String, String)>> {
-    let output = std::process::Command::new("pactl")
-        .args(["list", "short", "sources"])
-        .output()
-        .map_err(|e| anyhow!("Failed to run pactl: {}", e))?;
+    use pulse::callbacks::ListResult;
+    use pulse::context::{Context, State as ContextState};
+    use pulse::mainloop::standard::{IterateResult, Mainloop};
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
 
-    if !output.status.success() {
-        return Err(anyhow!("pactl list short sources failed"));
-    }
+    let mainloop = Rc::new(RefCell::new(
+        Mainloop::new().ok_or_else(|| anyhow!("Failed to create PulseAudio mainloop"))?,
+    ));
+    let context = Rc::new(RefCell::new(
+        Context::new(&*mainloop.borrow(), "cavibe-list")
+            .ok_or_else(|| anyhow!("Failed to create PulseAudio context"))?,
+    ));
 
-    let text = String::from_utf8_lossy(&output.stdout);
-    let mut sources = Vec::new();
-    for line in text.lines() {
-        // Format: <id>\t<name>\t<module>\t<sample_spec>\t<state>
-        let cols: Vec<&str> = line.split('\t').collect();
-        if cols.len() >= 5 {
-            sources.push((cols[1].to_string(), cols[4].to_string()));
+    context
+        .borrow_mut()
+        .connect(None, pulse::context::FlagSet::NOFLAGS, None)
+        .map_err(|_| anyhow!("Failed to connect to PulseAudio"))?;
+
+    // Wait for context to be ready
+    loop {
+        match mainloop.borrow_mut().iterate(true) {
+            IterateResult::Success(_) => {}
+            _ => return Err(anyhow!("PulseAudio mainloop error")),
+        }
+        match context.borrow().get_state() {
+            ContextState::Ready => break,
+            ContextState::Failed | ContextState::Terminated => {
+                return Err(anyhow!("PulseAudio connection failed"));
+            }
+            _ => {}
         }
     }
-    Ok(sources)
+
+    let sources = Rc::new(RefCell::new(Vec::new()));
+    let done = Rc::new(Cell::new(false));
+
+    let sources_clone = sources.clone();
+    let done_clone = done.clone();
+
+    let _op = context
+        .borrow()
+        .introspect()
+        .get_source_info_list(move |result| match result {
+            ListResult::Item(info) => {
+                let name = info.name.as_ref().map(|n| n.to_string()).unwrap_or_default();
+                let state = match info.state {
+                    pulse::def::SourceState::Running => "RUNNING",
+                    pulse::def::SourceState::Idle => "IDLE",
+                    pulse::def::SourceState::Suspended => "SUSPENDED",
+                    _ => "UNKNOWN",
+                };
+                sources_clone.borrow_mut().push((name, state.to_string()));
+            }
+            ListResult::End | ListResult::Error => {
+                done_clone.set(true);
+            }
+        });
+
+    while !done.get() {
+        match mainloop.borrow_mut().iterate(true) {
+            IterateResult::Success(_) => {}
+            _ => return Err(anyhow!("PulseAudio mainloop error")),
+        }
+    }
+
+    Ok(Rc::try_unwrap(sources).unwrap().into_inner())
 }
 
 impl AudioCapture {
