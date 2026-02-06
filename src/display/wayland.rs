@@ -36,13 +36,13 @@ use wayland_client::{
     Connection, Proxy, QueueHandle,
 };
 
-use crate::audio::{self, AudioData};
+use crate::audio::{self, AudioCapture, AudioData};
 use crate::color::ColorScheme;
 use crate::config::{Config, FontStyle, MultiMonitorMode, TextAlignment, TextAnimation, TextConfig, TextPosition, WallpaperAnchor};
 use crate::ipc::IpcCommand;
 use crate::metadata::{self, TrackInfo};
 use crate::visualizer::{VisualizerState, VISUALIZER_STYLES};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 impl WallpaperAnchor {
     /// Convert to layer-shell Anchor bitflags
@@ -77,6 +77,12 @@ struct RenderOptions<'a> {
     text_config: &'a TextConfig,
 }
 
+/// An audio capture pipeline with its receiver
+struct AudioPipeline {
+    _capture: AudioCapture,
+    rx: watch::Receiver<Arc<AudioData>>,
+}
+
 /// Per-output surface state
 struct OutputSurface {
     output_name: Option<String>,
@@ -92,6 +98,9 @@ struct OutputSurface {
     color_scheme_override: Option<ColorScheme>,
     style_override: Option<usize>,
     opacity_override: Option<f32>,
+    // Per-monitor audio
+    audio_source_key: Option<String>, // Key into audio_pipelines map
+    audio_data: Arc<AudioData>,       // Cached per-surface audio data
 }
 
 /// Wayland layer-shell wallpaper renderer with multi-monitor support
@@ -109,7 +118,7 @@ struct WallpaperState {
     // Shared visualizer state
     visualizer: VisualizerState,
     color_scheme: ColorScheme,
-    audio_data: Arc<AudioData>,
+    audio_pipelines: HashMap<Option<String>, AudioPipeline>,
     track_info: Arc<TrackInfo>,
     last_frame: Instant,
     time: f32,
@@ -145,7 +154,7 @@ impl WallpaperState {
             surfaces: HashMap::new(),
             visualizer,
             color_scheme,
-            audio_data: Arc::new(AudioData::default()),
+            audio_pipelines: HashMap::new(),
             track_info: Arc::new(TrackInfo::default()),
             last_frame: Instant::now(),
             time: 0.0,
@@ -183,9 +192,9 @@ impl WallpaperState {
     }
 
     /// Get per-monitor overrides from config
-    fn get_monitor_overrides(&self, output_name: &Option<String>) -> (Option<ColorScheme>, Option<usize>, Option<f32>) {
+    fn get_monitor_overrides(&self, output_name: &Option<String>) -> (Option<ColorScheme>, Option<usize>, Option<f32>, Option<String>) {
         if self.config.wallpaper.multi_monitor != MultiMonitorMode::Independent {
-            return (None, None, None);
+            return (None, None, None, None);
         }
 
         if let Some(ref name) = output_name {
@@ -194,12 +203,12 @@ impl WallpaperState {
                     let style_idx = monitor_cfg.style.as_ref().and_then(|s| {
                         VISUALIZER_STYLES.iter().position(|vs| vs.name().eq_ignore_ascii_case(s))
                     });
-                    return (monitor_cfg.color_scheme, style_idx, monitor_cfg.opacity);
+                    return (monitor_cfg.color_scheme, style_idx, monitor_cfg.opacity, monitor_cfg.audio_source.clone());
                 }
             }
         }
 
-        (None, None, None)
+        (None, None, None, None)
     }
 
     /// Create a layer surface for a specific output
@@ -260,7 +269,7 @@ impl WallpaperState {
         layer_surface.commit();
 
         // Get per-monitor overrides
-        let (color_override, style_override, opacity_override) = self.get_monitor_overrides(&output_name);
+        let (color_override, style_override, opacity_override, audio_source) = self.get_monitor_overrides(&output_name);
 
         let surface = OutputSurface {
             output_name,
@@ -275,6 +284,8 @@ impl WallpaperState {
             color_scheme_override: color_override,
             style_override,
             opacity_override,
+            audio_source_key: audio_source,
+            audio_data: Arc::new(AudioData::default()),
         };
 
         self.surfaces.insert(output.id(), surface);
@@ -377,8 +388,8 @@ impl WallpaperState {
         // Render the visualizer to the canvas
         let width = surface.width as usize;
         let height = surface.height as usize;
-        let frequencies = self.audio_data.frequencies.clone();
-        let intensity = self.audio_data.intensity;
+        let frequencies = surface.audio_data.frequencies.clone();
+        let intensity = surface.audio_data.intensity;
         let track_title = self.track_info.title.clone();
         let track_artist = self.track_info.artist.clone();
         let pixel_scale = 8;
@@ -1336,12 +1347,33 @@ pub async fn run(config: Config, ipc_rx: mpsc::Receiver<IpcCommand>) -> Result<(
     let total_count = state.surfaces.len();
     info!("Layer surfaces configured: {}/{} outputs", configured_count, total_count);
 
-    // Start audio capture
-    let (_audio_capture, audio_rx) = audio::create_audio_pipeline(
-        config.visualizer.bars,
-        config.audio.smoothing,
-        config.audio.sensitivity,
-    )?;
+    // Collect unique audio sources across all surfaces
+    // Always include None (default) for surfaces without an override
+    let mut audio_sources: Vec<Option<String>> = vec![None];
+    for surface in state.surfaces.values() {
+        if let Some(ref source) = surface.audio_source_key {
+            if !audio_sources.iter().any(|s| s.as_deref() == Some(source.as_str())) {
+                audio_sources.push(Some(source.clone()));
+            }
+        }
+    }
+
+    // Create one audio pipeline per unique source
+    for source in &audio_sources {
+        // For the default pipeline, use config.audio.device; for overrides, use the sink name
+        let device = source.clone().or_else(|| config.audio.device.clone());
+        let (capture, rx) = audio::create_audio_pipeline(
+            config.visualizer.bars,
+            config.audio.smoothing,
+            config.audio.sensitivity,
+            device,
+        )?;
+        state.audio_pipelines.insert(source.clone(), AudioPipeline {
+            _capture: capture,
+            rx,
+        });
+        info!("Audio pipeline created for source: {:?}", source);
+    }
 
     // Start metadata watcher
     let metadata_rx = metadata::start_watcher();
@@ -1371,8 +1403,24 @@ pub async fn run(config: Config, ipc_rx: mpsc::Receiver<IpcCommand>) -> Result<(
     while state.running {
         let frame_start = Instant::now();
 
-        // Update audio and metadata
-        state.audio_data = audio_rx.borrow().clone();
+        // Collect latest audio data from all pipelines
+        let mut latest_audio: HashMap<Option<String>, Arc<AudioData>> = HashMap::new();
+        for (source_key, pipeline) in &state.audio_pipelines {
+            latest_audio.insert(source_key.clone(), pipeline.rx.borrow().clone());
+        }
+
+        // Update each surface's audio data based on its source key
+        for surface in state.surfaces.values_mut() {
+            let key = &surface.audio_source_key;
+            if let Some(data) = latest_audio.get(key) {
+                surface.audio_data = data.clone();
+            } else if let Some(data) = latest_audio.get(&None) {
+                // Fall back to default pipeline
+                surface.audio_data = data.clone();
+            }
+        }
+
+        // Update metadata
         state.track_info = metadata_rx.borrow().clone();
 
         // Calculate delta time

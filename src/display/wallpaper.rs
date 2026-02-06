@@ -170,6 +170,7 @@ async fn run_direct_mode(config: Config, mut ipc_rx: mpsc::Receiver<IpcCommand>)
         config.visualizer.bars,
         config.audio.smoothing,
         config.audio.sensitivity,
+        config.audio.device.clone(),
     )?;
 
     // Initialize metadata source

@@ -32,8 +32,9 @@ pub fn create_audio_pipeline(
     num_bars: usize,
     smoothing: f32,
     sensitivity: f32,
+    device: Option<String>,
 ) -> anyhow::Result<(AudioCapture, watch::Receiver<Arc<AudioData>>)> {
     let (tx, rx) = watch::channel(Arc::new(AudioData::default()));
-    let capture = AudioCapture::new(num_bars, smoothing, sensitivity, tx)?;
+    let capture = AudioCapture::new(num_bars, smoothing, sensitivity, tx, device)?;
     Ok((capture, rx))
 }

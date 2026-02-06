@@ -26,6 +26,7 @@ pub struct MonitorConfig {
     pub color_scheme: Option<ColorScheme>,
     pub style: Option<String>, // Style name
     pub opacity: Option<f32>,
+    pub audio_source: Option<String>, // PulseAudio sink name for this monitor
 }
 
 fn default_true() -> bool {
@@ -604,6 +605,7 @@ margin = 0
 # color_scheme = "rainbow"
 # # style = "wave"
 # # opacity = 0.8
+# # audio_source = "alsa_output.pci-0000_01_00.1.hdmi-stereo"
 #
 # [[wallpaper.monitors]]
 # output = "HDMI-A-1"

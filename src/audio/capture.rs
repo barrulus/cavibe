@@ -22,6 +22,7 @@ impl AudioCapture {
         smoothing: f32,
         sensitivity: f32,
         sender: watch::Sender<Arc<AudioData>>,
+        device: Option<String>,
     ) -> Result<Self> {
         // PulseAudio sample specification
         let sample_rate = 44100;
@@ -35,8 +36,14 @@ impl AudioCapture {
             return Err(anyhow!("Invalid PulseAudio sample spec"));
         }
 
-        // Try to find a monitor source for loopback capture
-        let device = Self::find_monitor_source();
+        // Use explicit device if provided, otherwise auto-detect
+        let device = if let Some(sink_name) = device {
+            let monitor = format!("{}.monitor", sink_name);
+            info!("Using explicit sink monitor: {}", monitor);
+            Some(monitor)
+        } else {
+            Self::find_monitor_source()
+        };
         info!("Using audio device: {}", device.as_deref().unwrap_or("default"));
 
         // Create PulseAudio simple connection for recording
@@ -110,25 +117,27 @@ impl AudioCapture {
         }
     }
 
-    /// Find a monitor source for capturing system audio output
+    /// Find a monitor source for capturing system audio output.
+    ///
+    /// Queries PulseAudio/PipeWire for the default sink and uses its monitor
+    /// source, so we always capture from whatever output the user is listening to.
     fn find_monitor_source() -> Option<String> {
-        // Try to get list of sources from PulseAudio
-        // For now, use a common default - the default output's monitor
-        // This works because PipeWire exposes monitors as "<sink-name>.monitor"
-
-        // Try common monitor source names
-        let candidates = [
-            "alsa_output.pci-0000_80_1f.3.analog-stereo.monitor",
-            "default_output.monitor",
-        ];
-
-        // For now, just use the first known working one
-        // A more robust solution would query PulseAudio for available sources
-        if let Some(candidate) = candidates.first() {
-            info!("Trying monitor source: {}", candidate);
-            return Some(candidate.to_string());
+        // Get the default sink name and append ".monitor" to capture its output
+        if let Ok(output) = std::process::Command::new("pactl")
+            .args(["get-default-sink"])
+            .output()
+        {
+            if output.status.success() {
+                let sink_name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !sink_name.is_empty() {
+                    let monitor = format!("{}.monitor", sink_name);
+                    info!("Using default sink monitor: {}", monitor);
+                    return Some(monitor);
+                }
+            }
         }
 
+        warn!("Could not determine default sink, using PulseAudio default source");
         None
     }
 }

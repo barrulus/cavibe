@@ -41,6 +41,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, config: 
         config.visualizer.bars,
         config.audio.smoothing,
         config.audio.sensitivity,
+        config.audio.device.clone(),
     )?;
 
     // Start metadata watcher
