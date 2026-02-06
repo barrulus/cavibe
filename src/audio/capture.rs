@@ -3,6 +3,7 @@ use libpulse_binding as pulse;
 use libpulse_simple_binding as psimple;
 use pulse::sample::{Format, Spec};
 use pulse::stream::Direction;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use tokio::sync::watch;
@@ -14,10 +15,76 @@ use super::AudioData;
 pub struct AudioCapture {
     // Keep the thread handle to ensure it stays alive
     _capture_thread: thread::JoinHandle<()>,
+    stop_flag: Arc<AtomicBool>,
+}
+
+impl Drop for AudioCapture {
+    fn drop(&mut self) {
+        self.stop_flag.store(true, Ordering::Relaxed);
+    }
+}
+
+/// List available PulseAudio/PipeWire sources.
+///
+/// Returns a list of `(name, state)` tuples parsed from `pactl list short sources`.
+pub fn list_sources() -> Result<Vec<(String, String)>> {
+    let output = std::process::Command::new("pactl")
+        .args(["list", "short", "sources"])
+        .output()
+        .map_err(|e| anyhow!("Failed to run pactl: {}", e))?;
+
+    if !output.status.success() {
+        return Err(anyhow!("pactl list short sources failed"));
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut sources = Vec::new();
+    for line in text.lines() {
+        // Format: <id>\t<name>\t<module>\t<sample_spec>\t<state>
+        let cols: Vec<&str> = line.split('\t').collect();
+        if cols.len() >= 5 {
+            sources.push((cols[1].to_string(), cols[4].to_string()));
+        }
+    }
+    Ok(sources)
 }
 
 impl AudioCapture {
     pub fn new(
+        num_bars: usize,
+        smoothing: f32,
+        sensitivity: f32,
+        sender: watch::Sender<Arc<AudioData>>,
+        device: Option<String>,
+    ) -> Result<Self> {
+        // Use explicit device if provided, otherwise auto-detect
+        let source = if let Some(sink_name) = device {
+            let monitor = format!("{}.monitor", sink_name);
+            info!("Using explicit sink monitor: {}", monitor);
+            Some(monitor)
+        } else {
+            Self::find_monitor_source()
+        };
+
+        Self::start_capture(num_bars, smoothing, sensitivity, sender, source)
+    }
+
+    /// Create an AudioCapture using a raw PulseAudio source name (no `.monitor` appended).
+    ///
+    /// Use this when the caller already has a full source name (e.g. from `list_sources()`).
+    pub fn new_with_source(
+        num_bars: usize,
+        smoothing: f32,
+        sensitivity: f32,
+        sender: watch::Sender<Arc<AudioData>>,
+        source: String,
+    ) -> Result<Self> {
+        info!("Using explicit source: {}", source);
+        Self::start_capture(num_bars, smoothing, sensitivity, sender, Some(source))
+    }
+
+    /// Common setup: connect to PulseAudio and spawn the capture thread.
+    fn start_capture(
         num_bars: usize,
         smoothing: f32,
         sensitivity: f32,
@@ -36,14 +103,6 @@ impl AudioCapture {
             return Err(anyhow!("Invalid PulseAudio sample spec"));
         }
 
-        // Use explicit device if provided, otherwise auto-detect
-        let device = if let Some(sink_name) = device {
-            let monitor = format!("{}.monitor", sink_name);
-            info!("Using explicit sink monitor: {}", monitor);
-            Some(monitor)
-        } else {
-            Self::find_monitor_source()
-        };
         info!("Using audio device: {}", device.as_deref().unwrap_or("default"));
 
         // Create PulseAudio simple connection for recording
@@ -61,13 +120,17 @@ impl AudioCapture {
 
         info!("Connected to PulseAudio, sensitivity: {}", sensitivity);
 
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let stop_flag_clone = stop_flag.clone();
+
         // Spawn capture thread
         let capture_thread = thread::spawn(move || {
-            Self::capture_loop(pulse, num_bars, sample_rate as f32, smoothing, sensitivity, sender);
+            Self::capture_loop(pulse, num_bars, sample_rate as f32, smoothing, sensitivity, sender, stop_flag_clone);
         });
 
         Ok(Self {
             _capture_thread: capture_thread,
+            stop_flag,
         })
     }
 
@@ -78,6 +141,7 @@ impl AudioCapture {
         smoothing: f32,
         sensitivity: f32,
         sender: watch::Sender<Arc<AudioData>>,
+        stop_flag: Arc<AtomicBool>,
     ) {
         let mut analyzer = FrequencyAnalyzer::new(num_bars, sample_rate, smoothing, sensitivity);
 
@@ -87,6 +151,10 @@ impl AudioCapture {
         let mut buffer = vec![0.0f32; buffer_size];
 
         loop {
+            if stop_flag.load(Ordering::Relaxed) {
+                debug!("Stop flag set, ending capture loop");
+                break;
+            }
             // Read audio data from PulseAudio
             let byte_slice = unsafe {
                 std::slice::from_raw_parts_mut(

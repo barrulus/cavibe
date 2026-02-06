@@ -1430,18 +1430,66 @@ pub async fn run(config: Config, ipc_rx: mpsc::Receiver<IpcCommand>) -> Result<(
 
         // Process IPC commands (non-blocking)
         while let Ok(cmd) = state.ipc_rx.try_recv() {
-            let mut opacity = state.config.visualizer.opacity;
-            let monitors = state.list_monitors();
-            crate::ipc::process_ipc_command(
-                cmd,
-                &mut state.visualizer,
-                &mut state.color_scheme,
-                &mut state.visible,
-                &mut opacity,
-                &mut state.config,
-                &monitors,
-            );
-            state.config.visualizer.opacity = opacity;
+            // Intercept audio commands before generic handler
+            match cmd {
+                IpcCommand::ListSources { reply } => {
+                    let response = match audio::list_sources() {
+                        Ok(sources) => {
+                            let list: Vec<String> = sources
+                                .iter()
+                                .map(|(name, s)| format!("{} ({})", name, s))
+                                .collect();
+                            format!("ok: {}", list.join(", "))
+                        }
+                        Err(e) => format!("err: {}", e),
+                    };
+                    let _ = reply.send(response);
+                }
+                IpcCommand::SetSource { name, reply } => {
+                    let result = if name == "default" {
+                        audio::create_audio_pipeline(
+                            config.visualizer.bars,
+                            config.audio.smoothing,
+                            config.audio.sensitivity,
+                            config.audio.device.clone(),
+                        )
+                    } else {
+                        audio::create_audio_pipeline_with_source(
+                            config.visualizer.bars,
+                            config.audio.smoothing,
+                            config.audio.sensitivity,
+                            name.clone(),
+                        )
+                    };
+                    match result {
+                        Ok((capture, rx)) => {
+                            state.audio_pipelines.remove(&None);
+                            state.audio_pipelines.insert(None, AudioPipeline {
+                                _capture: capture,
+                                rx,
+                            });
+                            let _ = reply.send(format!("ok: {}", name));
+                        }
+                        Err(e) => {
+                            let _ = reply.send(format!("err: {}", e));
+                        }
+                    }
+                }
+                cmd => {
+                    let mut opacity = state.config.visualizer.opacity;
+                    let monitors = state.list_monitors();
+                    crate::ipc::process_ipc_command(
+                        cmd,
+                        &mut state.visualizer,
+                        &mut state.color_scheme,
+                        &mut state.visible,
+                        &mut opacity,
+                        &mut state.config,
+                        &monitors,
+                    );
+                    state.config.visualizer.opacity = opacity;
+                }
+            }
         }
 
         // Auto-rotate color schemes if enabled

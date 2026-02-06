@@ -166,7 +166,7 @@ async fn run_direct_mode(config: Config, mut ipc_rx: mpsc::Receiver<IpcCommand>)
     });
 
     // Initialize audio capture
-    let (_audio_capture, mut audio_rx) = audio::create_audio_pipeline(
+    let (mut _audio_capture, mut audio_rx) = audio::create_audio_pipeline(
         config.visualizer.bars,
         config.audio.smoothing,
         config.audio.sensitivity,
@@ -199,15 +199,60 @@ async fn run_direct_mode(config: Config, mut ipc_rx: mpsc::Receiver<IpcCommand>)
 
         // Process IPC commands (non-blocking)
         while let Ok(cmd) = ipc_rx.try_recv() {
-            crate::ipc::process_ipc_command(
-                cmd,
-                &mut visualizer,
-                &mut color_scheme,
-                &mut visible,
-                &mut opacity,
-                &mut config,
-                &[], // No monitor info in X11/direct mode
-            );
+            // Intercept audio commands before generic handler
+            match cmd {
+                IpcCommand::ListSources { reply } => {
+                    let response = match audio::list_sources() {
+                        Ok(sources) => {
+                            let list: Vec<String> = sources
+                                .iter()
+                                .map(|(name, s)| format!("{} ({})", name, s))
+                                .collect();
+                            format!("ok: {}", list.join(", "))
+                        }
+                        Err(e) => format!("err: {}", e),
+                    };
+                    let _ = reply.send(response);
+                }
+                IpcCommand::SetSource { name, reply } => {
+                    let result = if name == "default" {
+                        audio::create_audio_pipeline(
+                            config.visualizer.bars,
+                            config.audio.smoothing,
+                            config.audio.sensitivity,
+                            config.audio.device.clone(),
+                        )
+                    } else {
+                        audio::create_audio_pipeline_with_source(
+                            config.visualizer.bars,
+                            config.audio.smoothing,
+                            config.audio.sensitivity,
+                            name.clone(),
+                        )
+                    };
+                    match result {
+                        Ok((capture, rx)) => {
+                            _audio_capture = capture;
+                            audio_rx = rx;
+                            let _ = reply.send(format!("ok: {}", name));
+                        }
+                        Err(e) => {
+                            let _ = reply.send(format!("err: {}", e));
+                        }
+                    }
+                }
+                cmd => {
+                    crate::ipc::process_ipc_command(
+                        cmd,
+                        &mut visualizer,
+                        &mut color_scheme,
+                        &mut visible,
+                        &mut opacity,
+                        &mut config,
+                        &[], // No monitor info in X11/direct mode
+                    );
+                }
+            }
         }
 
         if !visible {

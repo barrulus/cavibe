@@ -212,6 +212,12 @@ pub enum CtlAction {
         #[command(subcommand)]
         action: TextAction,
     },
+    /// Switch audio source
+    #[command(name = "set-source")]
+    SetSource {
+        /// Source name (use "default" to revert to auto-detected)
+        name: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -250,6 +256,7 @@ impl CtlAction {
                 TextAction::Animation { value } => format!("text animation {}", value),
                 TextAction::Toggle => "text toggle".to_string(),
             },
+            CtlAction::SetSource { name } => format!("set source {}", name),
         }
     }
 }

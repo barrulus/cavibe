@@ -27,6 +27,8 @@ pub enum IpcCommand {
     TextFont { value: FontStyle, reply: oneshot::Sender<String> },
     TextAnimation { value: TextAnimation, reply: oneshot::Sender<String> },
     TextToggle { reply: oneshot::Sender<String> },
+    ListSources { reply: oneshot::Sender<String> },
+    SetSource { name: String, reply: oneshot::Sender<String> },
 }
 
 /// Get the socket path for IPC
@@ -87,6 +89,8 @@ fn parse_command(line: &str, reply: oneshot::Sender<String>) -> Result<IpcComman
             Ok(IpcCommand::TextAnimation { value: anim, reply })
         }
         ["text", "toggle"] => Ok(IpcCommand::TextToggle { reply }),
+        ["list", "sources"] => Ok(IpcCommand::ListSources { reply }),
+        ["set", "source", name] => Ok(IpcCommand::SetSource { name: name.to_string(), reply }),
         _ => Err(anyhow::anyhow!("Unknown command: {}", line)),
     }
 }
@@ -194,6 +198,13 @@ pub fn process_ipc_command(
                 config.text.show_artist = false;
                 let _ = reply.send("ok: hidden".to_string());
             }
+        }
+        // Audio commands are intercepted in render loops before reaching here
+        IpcCommand::ListSources { reply } => {
+            let _ = reply.send("err: not supported in this mode".to_string());
+        }
+        IpcCommand::SetSource { reply, .. } => {
+            let _ = reply.send("err: not supported in this mode".to_string());
         }
     }
 }

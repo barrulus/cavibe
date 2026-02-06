@@ -1,7 +1,7 @@
 mod capture;
 mod fft;
 
-pub use capture::AudioCapture;
+pub use capture::{list_sources, AudioCapture};
 
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -36,5 +36,20 @@ pub fn create_audio_pipeline(
 ) -> anyhow::Result<(AudioCapture, watch::Receiver<Arc<AudioData>>)> {
     let (tx, rx) = watch::channel(Arc::new(AudioData::default()));
     let capture = AudioCapture::new(num_bars, smoothing, sensitivity, tx, device)?;
+    Ok((capture, rx))
+}
+
+/// Create an audio processing pipeline using a raw PulseAudio source name.
+///
+/// Unlike `create_audio_pipeline`, this does NOT append `.monitor` to the source name,
+/// which is appropriate when using source names from `list_sources()`.
+pub fn create_audio_pipeline_with_source(
+    num_bars: usize,
+    smoothing: f32,
+    sensitivity: f32,
+    source: String,
+) -> anyhow::Result<(AudioCapture, watch::Receiver<Arc<AudioData>>)> {
+    let (tx, rx) = watch::channel(Arc::new(AudioData::default()));
+    let capture = AudioCapture::new_with_source(num_bars, smoothing, sensitivity, tx, source)?;
     Ok((capture, rx))
 }
