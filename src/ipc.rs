@@ -287,17 +287,16 @@ pub async fn send_command(line: &str) -> Result<String> {
     .context("Connection timed out")?
     .context("Could not connect to cavibe. Is it running in wallpaper mode?")?;
 
-    let (reader, mut writer) = stream.into_split();
+    let (mut reader, mut writer) = stream.into_split();
 
     writer.write_all(format!("{}\n", line).as_bytes()).await?;
     writer.shutdown().await?;
 
-    let mut buf_reader = BufReader::new(reader);
     let mut response = String::new();
 
     tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        buf_reader.read_line(&mut response),
+        tokio::io::AsyncReadExt::read_to_string(&mut reader, &mut response),
     )
     .await
     .context("Response timed out")?

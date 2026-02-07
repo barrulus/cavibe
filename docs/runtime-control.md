@@ -77,7 +77,7 @@ The IPC socket is created at `$XDG_RUNTIME_DIR/cavibe.sock` (fallback: `/tmp/cav
 
 ## Protocol
 
-The socket uses a simple line-based text protocol. Each command is a single line terminated by `\n`, and the response is a single line prefixed with `ok:` or `err:`.
+The socket uses a text protocol. Each command is a single line terminated by `\n`. The response may be single or multi-line (e.g. parse errors), prefixed with `ok:` or `err:`. Read until EOF to get the full response.
 
 This means you can also interact with it directly using socat:
 
