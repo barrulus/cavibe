@@ -472,23 +472,15 @@ impl Config {
     }
 
     /// Load config from the default XDG path if it exists
-    /// Returns None if file doesn't exist, logs warning on parse errors
-    pub fn load_from_default_path() -> Option<Self> {
-        let path = Self::default_path()?;
+    /// Returns Ok(None) if file doesn't exist, Err on parse errors
+    pub fn load_from_default_path() -> Result<Option<Self>> {
+        let Some(path) = Self::default_path() else {
+            return Ok(None);
+        };
         if path.exists() {
-            match Self::load(&path) {
-                Ok(config) => Some(config),
-                Err(e) => {
-                    eprintln!(
-                        "Warning: Failed to parse config at {}: {}\nUsing defaults.",
-                        path.display(),
-                        e
-                    );
-                    None
-                }
-            }
+            Ok(Some(Self::load(&path)?))
         } else {
-            None
+            Ok(None)
         }
     }
 

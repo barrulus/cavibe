@@ -69,6 +69,7 @@ multi_monitor = "clone"     # "clone" (same on all) or "independent" (per-monito
 # color_scheme = "rainbow"
 # style = "wave"
 # opacity = 0.8
+# audio_source = "alsa_output.pci-0000_01_00.1.hdmi-stereo"
 ```
 
 ## CLI Arguments

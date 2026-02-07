@@ -293,7 +293,14 @@ async fn main() -> Result<()> {
         Config::load(path)?
     } else if !args.no_config {
         // Try loading from XDG default path
-        Config::load_from_default_path().unwrap_or_default()
+        match Config::load_from_default_path() {
+            Ok(Some(config)) => config,
+            Ok(None) => Config::default(),
+            Err(e) => {
+                eprintln!("Warning: {}\nUsing defaults.", e);
+                Config::default()
+            }
+        }
     } else {
         // --no-config flag: use defaults
         Config::default()

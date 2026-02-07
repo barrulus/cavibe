@@ -16,7 +16,12 @@ cavibe ctl status           # Show current settings
 cavibe ctl list styles      # List available visualizer styles
 cavibe ctl list colors      # List available color schemes
 cavibe ctl list monitors    # List connected outputs and their status
+cavibe ctl list sources     # List available audio sources
 cavibe ctl ping             # Check if cavibe is running
+
+# Audio source
+cavibe ctl set-source <name>           # Switch to a specific audio source
+cavibe ctl set-source default          # Revert to auto-detected source
 
 # Text controls
 cavibe ctl text position top        # Move text to top/bottom/center

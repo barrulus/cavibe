@@ -133,14 +133,17 @@ pub fn process_ipc_command(
         }
         IpcCommand::Reload { reply } => {
             match Config::load_from_default_path() {
-                Some(new_config) => {
+                Ok(Some(new_config)) => {
                     *color_scheme = new_config.visualizer.color_scheme;
                     *opacity = new_config.visualizer.opacity;
                     *config = new_config;
                     let _ = reply.send("ok: reloaded".to_string());
                 }
-                None => {
-                    let _ = reply.send("err: could not load config".to_string());
+                Ok(None) => {
+                    let _ = reply.send("err: config file not found".to_string());
+                }
+                Err(e) => {
+                    let _ = reply.send(format!("err: {}", e));
                 }
             }
         }
