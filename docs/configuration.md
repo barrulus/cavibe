@@ -26,6 +26,7 @@ sensitivity = 1.0           # 0.1-10.0, higher = more reactive
 [visualizer]
 bars = 64
 color_scheme = "spectrum"   # spectrum, rainbow, fire, ocean, forest, purple, monochrome
+# style = "classic bars"   # classic bars, mirrored bars, wave, dots, blocks
 bar_width = 2               # proportional width of bars
 bar_spacing = 1             # proportional spacing between bars
 mirror = false              # mirror visualization from center
@@ -91,6 +92,7 @@ All config values can be overridden from the command line. CLI takes priority ov
 |------|-------------|
 | `-b, --bars <N>` | Number of frequency bars (default: 64) |
 | `--colors <SCHEME>` | Color scheme name |
+| `--style <NAME>` | Visualizer style (e.g. `"wave"`, `"dots"`) |
 | `--bar-width <N>` | Proportional bar width |
 | `--bar-spacing <N>` | Proportional bar spacing |
 | `--mirror` | Mirror visualization horizontally |

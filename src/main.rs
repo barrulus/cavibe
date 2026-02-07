@@ -1,5 +1,6 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 
 mod audio;
 mod color;
@@ -43,6 +44,10 @@ pub struct Args {
     /// Color scheme: spectrum, rainbow, fire, ocean, monochrome
     #[arg(long, default_value = "spectrum")]
     pub colors: String,
+
+    /// Visualizer style: "classic bars", "mirrored bars", "wave", "dots", "blocks"
+    #[arg(long)]
+    pub style: Option<String>,
 
     /// Rotate display styles automatically
     #[arg(long)]
@@ -175,6 +180,12 @@ pub enum Command {
         #[command(subcommand)]
         action: CtlAction,
     },
+    /// Generate shell completions
+    Completions {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: Shell,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -265,11 +276,18 @@ impl CtlAction {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Handle ctl subcommand - client mode, no daemon startup
-    if let Some(Command::Ctl { action }) = &args.command {
-        let response = ipc::send_command(&action.to_protocol_line()).await?;
-        println!("{}", response);
-        return Ok(());
+    // Handle subcommands that don't need daemon startup
+    match &args.command {
+        Some(Command::Ctl { action }) => {
+            let response = ipc::send_command(&action.to_protocol_line()).await?;
+            println!("{}", response);
+            return Ok(());
+        }
+        Some(Command::Completions { shell }) => {
+            clap_complete::generate(*shell, &mut Args::command(), "cavibe", &mut std::io::stdout());
+            return Ok(());
+        }
+        None => {}
     }
 
     // Handle --init-config flag (before logging init)

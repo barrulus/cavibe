@@ -63,6 +63,8 @@ pub struct AudioConfig {
 pub struct VisualizerConfig {
     pub bars: usize,
     pub color_scheme: ColorScheme,
+    #[serde(default)]
+    pub style: Option<String>,
     pub bar_width: u16,
     pub bar_spacing: u16,
     pub mirror: bool,
@@ -431,6 +433,7 @@ impl Default for Config {
             visualizer: VisualizerConfig {
                 bars: 64,
                 color_scheme: ColorScheme::Spectrum,
+                style: None,
                 bar_width: 2,
                 bar_spacing: 1,
                 mirror: false,
@@ -531,6 +534,8 @@ sensitivity = 1.0
 bars = 64
 # Color scheme: "spectrum", "rainbow", "fire", "ocean", "forest", "purple", "monochrome"
 color_scheme = "spectrum"
+# Visualizer style: "classic bars", "mirrored bars", "wave", "dots", "blocks"
+# style = "classic bars"
 # Width of each bar in characters
 bar_width = 2
 # Spacing between bars in characters
@@ -635,6 +640,9 @@ margin = 0
         // Visualizer settings
         self.visualizer.bars = args.bars;
         self.visualizer.color_scheme = args.colors.parse().unwrap_or(self.visualizer.color_scheme);
+        if args.style.is_some() {
+            self.visualizer.style = args.style.clone();
+        }
         if let Some(width) = args.bar_width {
             self.visualizer.bar_width = width;
         }

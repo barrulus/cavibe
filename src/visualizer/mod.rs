@@ -36,10 +36,19 @@ pub struct VisualizerState {
 
 impl VisualizerState {
     pub fn new(visualizer_config: VisualizerConfig, text_config: TextConfig) -> Self {
+        let initial_style = visualizer_config
+            .style
+            .as_deref()
+            .and_then(|name| {
+                VISUALIZER_STYLES
+                    .iter()
+                    .position(|s| s.name().eq_ignore_ascii_case(name))
+            })
+            .unwrap_or(0);
         Self {
             text_animator: TextAnimator::new(text_config),
             visualizer_config,
-            current_style: 0,
+            current_style: initial_style,
             time: 0.0,
         }
     }

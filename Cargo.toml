@@ -1,6 +1,6 @@
 [package]
 name = "cavibe"
-version = "0.5.2"
+version = "0.5.3"
 edition = "2021"
 authors = ["barrulus"]
 description = "Audio visualizer with animated song display - terminal and wallpaper modes"
@@ -35,6 +35,7 @@ mpris = "2"
 
 # CLI arguments
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 
 # Error handling
 anyhow = "1"
