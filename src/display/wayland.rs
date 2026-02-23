@@ -126,6 +126,7 @@ struct WallpaperState {
     // Control
     running: bool,
     visible: bool,
+    active: bool, // true when audio is playing and frames are being rendered
     config: Config,
 
     // IPC
@@ -160,6 +161,7 @@ impl WallpaperState {
             time: 0.0,
             running: true,
             visible: true,
+            active: true,
             config,
             ipc_rx,
         }
@@ -345,12 +347,7 @@ impl WallpaperState {
                     wl_shm::Format::Argb8888,
                 )
                 .expect("Failed to create buffer");
-            for pixel in canvas.chunks_exact_mut(4) {
-                pixel[0] = 0;
-                pixel[1] = 0;
-                pixel[2] = 0;
-                pixel[3] = 0;
-            }
+            canvas.fill(0);
             let wl_surf = surface.layer_surface.wl_surface();
             buffer.attach_to(wl_surf).expect("Failed to attach buffer");
             wl_surf.damage_buffer(0, 0, surface.width as i32, surface.height as i32);
@@ -459,12 +456,7 @@ fn render_to_buffer(
     opts: &RenderOptions,
 ) {
     // Clear to fully transparent (let wallpaper show through)
-    for pixel in canvas.chunks_exact_mut(4) {
-        pixel[0] = 0; // B
-        pixel[1] = 0; // G
-        pixel[2] = 0; // R
-        pixel[3] = 0; // A - fully transparent background
-    }
+    canvas.fill(0);
 
     // Render bars
     render_bars(canvas, width, height, frequencies, opts);
@@ -1135,10 +1127,21 @@ impl CompositorHandler for WallpaperState {
     fn frame(
         &mut self,
         _conn: &Connection,
-        _qh: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
         surface: &wl_surface::WlSurface,
         _time: u32,
     ) {
+        if !self.active {
+            // Go idle — don't re-request frame callback, don't draw.
+            // The main loop will kick-start us when audio resumes.
+            return;
+        }
+
+        // Request next frame BEFORE drawing, because the compositor only
+        // sends a frame callback for commits that have a listener attached.
+        surface.frame(qh, surface.clone());
+
+        // Draw current frame (this calls commit(), which the callback above will fire for)
         self.draw_surface(surface);
     }
 
@@ -1251,7 +1254,8 @@ impl LayerShellHandler for WallpaperState {
         surface.pool = None;
         surface.configured = true;
 
-        // Request frame callback for animation
+        // Request frame callback then do initial draw (callback must be
+        // attached before commit so the compositor knows to send the next one)
         let wl_surface = layer.wl_surface();
         wl_surface.frame(qh, wl_surface.clone());
 
@@ -1380,7 +1384,7 @@ pub async fn run(config: Config, ipc_rx: mpsc::Receiver<IpcCommand>) -> Result<(
 
     info!("Wayland wallpaper mode running. Press Ctrl+C to stop.");
 
-    let target_fps = Duration::from_secs_f64(1.0 / 60.0);
+
 
     // Style rotation timer
     let mut style_timer = Instant::now();
@@ -1418,6 +1422,25 @@ pub async fn run(config: Config, ipc_rx: mpsc::Receiver<IpcCommand>) -> Result<(
                 // Fall back to default pipeline
                 surface.audio_data = data.clone();
             }
+        }
+
+        // Detect whether any audio is playing
+        let has_audio = state.surfaces.values()
+            .any(|s| s.audio_data.intensity > 0.001);
+
+        if has_audio && !state.active {
+            // Audio just started — kick-start frame callbacks on all surfaces
+            state.active = true;
+            for surface in state.surfaces.values() {
+                if surface.configured {
+                    let wl_surface = surface.layer_surface.wl_surface();
+                    wl_surface.frame(&qh, wl_surface.clone());
+                    wl_surface.commit();
+                }
+            }
+        } else if !has_audio && state.active {
+            // Audio stopped — let frame callbacks expire (they'll check active flag)
+            state.active = false;
         }
 
         // Update metadata
@@ -1515,22 +1538,16 @@ pub async fn run(config: Config, ipc_rx: mpsc::Receiver<IpcCommand>) -> Result<(
             .dispatch_pending(&mut state)
             .context("Wayland dispatch failed")?;
 
-        // Request next frame and draw for all configured surfaces
-        let surface_ids: Vec<_> = state.surfaces.keys().cloned().collect();
-        for output_id in surface_ids {
-            if let Some(surface) = state.surfaces.get(&output_id) {
-                if surface.configured {
-                    let wl_surface = surface.layer_surface.wl_surface().clone();
-                    wl_surface.frame(&qh, wl_surface.clone());
-                    state.draw_surface(&wl_surface);
-                }
-            }
-        }
-
-        // Frame rate limiting
+        // Sleep — use short interval when active (audio playing) for responsive
+        // state updates, longer when idle to minimize CPU usage
         let elapsed = frame_start.elapsed();
-        if elapsed < target_fps {
-            std::thread::sleep(target_fps - elapsed);
+        let poll_interval = if state.active {
+            Duration::from_millis(4)
+        } else {
+            Duration::from_millis(50)
+        };
+        if elapsed < poll_interval {
+            std::thread::sleep(poll_interval - elapsed);
         }
     }
 
