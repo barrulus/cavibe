@@ -41,11 +41,14 @@ Add to `~/.config/niri/config.kdl`:
 
 ```kdl
 binds {
-    Mod+Shift+V { spawn "cavibe" "ctl" "style" "next"; }
-    Mod+Shift+C { spawn "cavibe" "ctl" "color" "next"; }
-    Mod+Shift+H { spawn "cavibe" "ctl" "toggle"; }
+    Mod+Alt+Right  hotkey-overlay-title="Cavibe: Next Style"    { spawn "cavibe" "ctl" "style" "next"; }
+    Mod+Alt+Down   hotkey-overlay-title="Cavibe: Next Colour"   { spawn "cavibe" "ctl" "color" "next"; }
+    Mod+Alt+Return hotkey-overlay-title="Cavibe: Toggle Text"   { spawn "cavibe" "ctl" "text" "toggle"; }
+    Mod+Shift+H    hotkey-overlay-title="Cavibe: Toggle"        { spawn "cavibe" "ctl" "toggle"; }
 }
 ```
+
+The `hotkey-overlay-title` annotations make these bindings show up with descriptive labels in Niri's hotkey overlay (<kbd>Mod</kbd>+<kbd>?</kbd>).
 
 ### Sway
 
