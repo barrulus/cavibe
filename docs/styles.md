@@ -9,6 +9,7 @@
 | **Wave** | Continuous wave form visualization |
 | **Dots** | Floating dots with trailing effect |
 | **Blocks** | Unicode block characters for smooth gradients |
+| **Oscilloscope** | Raw audio waveform display (time-domain) |
 
 Cycle styles with `s` in terminal mode or `cavibe ctl style next` in wallpaper mode.
 

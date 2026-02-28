@@ -26,7 +26,7 @@ sensitivity = 1.0           # 0.1-10.0, higher = more reactive
 [visualizer]
 bars = 64
 color_scheme = "spectrum"   # spectrum, rainbow, fire, ocean, forest, purple, monochrome
-# style = "classic bars"   # classic bars, mirrored bars, wave, dots, blocks
+# style = "classic bars"   # classic bars, mirrored bars, wave, dots, blocks, oscilloscope
 bar_width = 2               # proportional width of bars
 bar_spacing = 1             # proportional spacing between bars
 mirror = false              # mirror visualization from center

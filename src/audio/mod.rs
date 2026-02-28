@@ -15,6 +15,8 @@ pub struct AudioData {
     pub intensity: f32,
     /// Bass intensity (low frequencies)
     pub bass: f32,
+    /// Raw waveform samples for oscilloscope display (-1.0 to 1.0)
+    pub waveform: Vec<f32>,
 }
 
 impl Default for AudioData {
@@ -23,6 +25,7 @@ impl Default for AudioData {
             frequencies: vec![0.0; 64],
             intensity: 0.0,
             bass: 0.0,
+            waveform: Vec::new(),
         }
     }
 }

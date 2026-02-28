@@ -40,6 +40,13 @@ impl FrequencyAnalyzer {
     }
 
     pub fn process(&mut self, samples: &[f32]) -> AudioData {
+        // Capture raw waveform before windowing (for oscilloscope display)
+        let waveform: Vec<f32> = samples
+            .iter()
+            .take(self.fft_size)
+            .map(|&s| (s * self.sensitivity * 2.0).clamp(-1.0, 1.0))
+            .collect();
+
         // Fill buffer with windowed samples
         for (i, sample) in samples.iter().take(self.fft_size).enumerate() {
             self.buffer[i] = Complex::new(sample * self.window[i], 0.0);
@@ -76,6 +83,7 @@ impl FrequencyAnalyzer {
             frequencies: smoothed,
             intensity,
             bass,
+            waveform,
         }
     }
 

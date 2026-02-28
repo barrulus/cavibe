@@ -534,7 +534,7 @@ sensitivity = 1.0
 bars = 64
 # Color scheme: "spectrum", "rainbow", "fire", "ocean", "forest", "purple", "monochrome"
 color_scheme = "spectrum"
-# Visualizer style: "classic bars", "mirrored bars", "wave", "dots", "blocks"
+# Visualizer style: "classic bars", "mirrored bars", "wave", "dots", "blocks", "oscilloscope"
 # style = "classic bars"
 # Width of each bar in characters
 bar_width = 2

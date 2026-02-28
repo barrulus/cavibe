@@ -72,6 +72,7 @@ struct RenderOptions<'a> {
     reverse_mirror: bool,
     opacity: f32,
     color_scheme: &'a ColorScheme,
+    waveform: &'a [f32],
 
     // Text settings
     text_config: &'a TextConfig,
@@ -386,6 +387,7 @@ impl WallpaperState {
         let width = surface.width as usize;
         let height = surface.height as usize;
         let frequencies = surface.audio_data.frequencies.clone();
+        let waveform = surface.audio_data.waveform.clone();
         let intensity = surface.audio_data.intensity;
         let track_title = self.track_info.title.clone();
         let track_artist = self.track_info.artist.clone();
@@ -402,6 +404,7 @@ impl WallpaperState {
             reverse_mirror: self.config.visualizer.reverse_mirror,
             opacity,
             color_scheme: &color_scheme,
+            waveform: &waveform,
             text_config: &self.config.text,
         };
 
@@ -590,6 +593,7 @@ fn render_bars(
         2 => render_bars_wave(canvas, width, height, &layout, opts),
         3 => render_bars_dots(canvas, width, height, &layout, opts),
         4 => render_bars_blocks(canvas, width, height, &layout, opts),
+        5 => render_bars_oscilloscope(canvas, width, height, &layout, opts),
         _ => render_bars_classic(canvas, width, height, &layout, opts),
     }
 }
@@ -806,6 +810,65 @@ fn render_bars_blocks(
                 }
             }
         }
+    }
+}
+
+/// Style 5: Oscilloscope — raw waveform as a continuous line
+fn render_bars_oscilloscope(
+    canvas: &mut [u8],
+    width: usize,
+    height: usize,
+    layout: &BarLayout,
+    opts: &RenderOptions,
+) {
+    if opts.waveform.is_empty() {
+        return;
+    }
+
+    let num_samples = opts.waveform.len();
+    let center_y = layout.bars_y_start + layout.bars_height / 2;
+    let half_height = layout.bars_height as f32 / 2.0;
+    // Line thickness in pixels
+    let thickness = (opts.bar_width / 4).max(1);
+
+    let mut prev_y: Option<usize> = None;
+
+    for x in 0..width {
+        // Map pixel x to sample index
+        let sample_idx = (x * num_samples) / width;
+        let sample = opts.waveform[sample_idx.min(num_samples - 1)];
+
+        // Map sample (-1..1) to pixel y within bar area
+        let y = ((center_y as f32 - sample * half_height) as usize)
+            .max(layout.bars_y_start)
+            .min(layout.bars_y_start + layout.bars_height - 1);
+
+        let position = x as f32 / width as f32;
+        let intensity = sample.abs().min(1.0);
+        let (r, g, b) = opts.color_scheme.get_color(position, intensity.max(0.3));
+
+        // Fill vertically between prev_y and y for smooth connections
+        let y_min;
+        let y_max;
+        if let Some(py) = prev_y {
+            y_min = py.min(y);
+            y_max = py.max(y);
+        } else {
+            y_min = y;
+            y_max = y;
+        }
+
+        for fill_y in y_min..=y_max {
+            for t in 0..thickness {
+                let px = x;
+                let py = fill_y + t;
+                if px < width && py >= layout.bars_y_start && py < layout.bars_y_start + layout.bars_height && py < height {
+                    put_pixel(canvas, width, px, py, r, g, b, opts.opacity);
+                }
+            }
+        }
+
+        prev_y = Some(y);
     }
 }
 

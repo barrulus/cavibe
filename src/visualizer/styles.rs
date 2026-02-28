@@ -362,6 +362,142 @@ fn render_bars(
     }
 }
 
+/// Oscilloscope style - raw waveform display using braille characters
+pub struct OscilloscopeStyle;
+
+impl Visualizer for OscilloscopeStyle {
+    fn name(&self) -> &'static str {
+        "Oscilloscope"
+    }
+
+    fn render(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        audio: &AudioData,
+        color_scheme: &ColorScheme,
+        _config: &VisualizerConfig,
+    ) {
+        if area.width == 0 || area.height == 0 || audio.waveform.is_empty() {
+            return;
+        }
+
+        // Braille grid: each character cell is 2 dots wide x 4 dots tall
+        let grid_w = area.width as usize * 2;
+        let grid_h = area.height as usize * 4;
+
+        // Allocate dot grid
+        let mut grid = vec![false; grid_w * grid_h];
+
+        let num_samples = audio.waveform.len();
+        let center_y = grid_h as f32 / 2.0;
+
+        // Map waveform samples to grid positions and connect with lines
+        let mut prev_gx: Option<usize> = None;
+        let mut prev_gy: Option<usize> = None;
+
+        for gx in 0..grid_w {
+            // Map grid x to sample index
+            let sample_idx = (gx * num_samples) / grid_w;
+            let sample = audio.waveform[sample_idx.min(num_samples - 1)];
+
+            // Map sample (-1..1) to grid y
+            let gy = ((center_y - sample * center_y) as usize).min(grid_h - 1);
+
+            if let (Some(px), Some(py)) = (prev_gx, prev_gy) {
+                // Bresenham line from (px, py) to (gx, gy)
+                bresenham_line(&mut grid, grid_w, grid_h, px, py, gx, gy);
+            } else {
+                // First point
+                grid[gy * grid_w + gx] = true;
+            }
+
+            prev_gx = Some(gx);
+            prev_gy = Some(gy);
+        }
+
+        // Convert dot grid to braille characters
+        // Braille dot positions within a 2x4 cell:
+        // (0,0)=0x01 (1,0)=0x08
+        // (0,1)=0x02 (1,1)=0x10
+        // (0,2)=0x04 (1,2)=0x20
+        // (0,3)=0x40 (1,3)=0x80
+        let dot_map: [[u8; 4]; 2] = [
+            [0x01, 0x02, 0x04, 0x40],
+            [0x08, 0x10, 0x20, 0x80],
+        ];
+
+        for cy in 0..area.height as usize {
+            for cx in 0..area.width as usize {
+                let mut braille: u8 = 0;
+                let mut has_dots = false;
+
+                for (dx, col) in dot_map.iter().enumerate() {
+                    for (dy, &bit) in col.iter().enumerate() {
+                        let gx = cx * 2 + dx;
+                        let gy = cy * 4 + dy;
+                        if gx < grid_w && gy < grid_h && grid[gy * grid_w + gx] {
+                            braille |= bit;
+                            has_dots = true;
+                        }
+                    }
+                }
+
+                if has_dots {
+                    let position = cx as f32 / area.width as f32;
+                    // Use the average waveform intensity for color
+                    let sample_idx = (cx * 2 * num_samples) / grid_w;
+                    let intensity = audio.waveform[sample_idx.min(num_samples - 1)].abs();
+                    let (r, g, b) = color_scheme.get_color(position, intensity.min(1.0));
+
+                    let ch = char::from_u32(0x2800 + braille as u32).unwrap_or(' ');
+                    let cell = frame.buffer_mut().cell_mut(
+                        (area.x + cx as u16, area.y + cy as u16),
+                    );
+                    if let Some(cell) = cell {
+                        cell.set_char(ch);
+                        cell.set_fg(Color::Rgb(r, g, b));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Draw a line on the dot grid using Bresenham's algorithm
+fn bresenham_line(grid: &mut [bool], grid_w: usize, grid_h: usize, x0: usize, y0: usize, x1: usize, y1: usize) {
+    let mut x0 = x0 as isize;
+    let mut y0 = y0 as isize;
+    let x1 = x1 as isize;
+    let y1 = y1 as isize;
+
+    let dx = (x1 - x0).abs();
+    let dy = -(y1 - y0).abs();
+    let sx: isize = if x0 < x1 { 1 } else { -1 };
+    let sy: isize = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+
+    loop {
+        if x0 >= 0 && x0 < grid_w as isize && y0 >= 0 && y0 < grid_h as isize {
+            grid[y0 as usize * grid_w + x0 as usize] = true;
+        }
+
+        if x0 == x1 && y0 == y1 {
+            break;
+        }
+
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err += dy;
+            x0 += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y0 += sy;
+        }
+    }
+}
+
 /// All available visualizer styles
 pub static VISUALIZER_STYLES: &[&(dyn Visualizer + Sync)] = &[
     &ClassicBars,
@@ -369,4 +505,5 @@ pub static VISUALIZER_STYLES: &[&(dyn Visualizer + Sync)] = &[
     &WaveStyle,
     &DotsStyle,
     &BlocksStyle,
+    &OscilloscopeStyle,
 ];

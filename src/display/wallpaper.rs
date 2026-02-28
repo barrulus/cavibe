@@ -397,6 +397,7 @@ fn render_bars_direct(
         2 => render_direct_wave(stdout, x, y, width, height, audio, color_scheme, config, bar_count),
         3 => render_direct_dots(stdout, x, y, width, height, audio, color_scheme, config, bar_count),
         4 => render_direct_blocks(stdout, x, y, width, height, audio, color_scheme, config, bar_count),
+        5 => render_direct_oscilloscope(stdout, x, y, width, height, audio, color_scheme),
         _ => render_direct_classic(stdout, x, y, width, height, audio, color_scheme, config, bar_count),
     }
 }
@@ -602,6 +603,60 @@ fn render_direct_blocks(
                 execute!(stdout, MoveTo(bar_x + bx, row), SetForegroundColor(Color::Rgb { r, g, b }), Print(ch))?;
             }
         }
+    }
+    Ok(())
+}
+
+/// Style 5: Oscilloscope — raw waveform as a continuous line
+fn render_direct_oscilloscope(
+    stdout: &mut impl Write,
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16,
+    audio: &Arc<AudioData>,
+    color_scheme: &ColorScheme,
+) -> Result<()> {
+    if audio.waveform.is_empty() || width == 0 || height == 0 {
+        return Ok(());
+    }
+
+    let num_samples = audio.waveform.len();
+    let center_y = y + height / 2;
+    let half_height = height as f32 / 2.0;
+
+    let mut prev_row: Option<u16> = None;
+
+    for col_offset in 0..width {
+        let col = x + col_offset;
+        // Map column to sample index
+        let sample_idx = (col_offset as usize * num_samples) / width as usize;
+        let sample = audio.waveform[sample_idx.min(num_samples - 1)];
+
+        // Map sample (-1..1) to row
+        let row = ((center_y as f32 - sample * half_height) as u16)
+            .max(y)
+            .min(y + height - 1);
+
+        let position = col_offset as f32 / width as f32;
+        let intensity = sample.abs().min(1.0);
+        let (r, g, b) = color_scheme.get_color(position, intensity.max(0.3));
+
+        // Fill vertically between prev_row and row for smoothness
+        let (y_min, y_max) = if let Some(pr) = prev_row {
+            (pr.min(row), pr.max(row))
+        } else {
+            (row, row)
+        };
+
+        for fill_row in y_min..=y_max {
+            if fill_row >= y && fill_row < y + height {
+                let ch = if fill_row == row { '●' } else { '│' };
+                execute!(stdout, MoveTo(col, fill_row), SetForegroundColor(Color::Rgb { r, g, b }), Print(ch))?;
+            }
+        }
+
+        prev_row = Some(row);
     }
     Ok(())
 }
