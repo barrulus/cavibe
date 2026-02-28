@@ -13,6 +13,14 @@
 | **Spectrogram** | Scrolling 2D heatmap (frequency vs time) |
 | **Radial** | Frequency bars radiating outward from a circle |
 
+| Radial | Classic Bars | Oscilloscope |
+|--------|--------------|--------------|
+| ![Radial](images/new-image-3.png) | ![Classic](images/new-image-6.png) | ![Oscilloscope](images/new-image-5.png) |
+
+| Dots | Spectrogram | Monochrome Bars |
+|------|-------------|-----------------|
+| ![Dots](images/new-image-8.png) | ![Spectrogram](images/new-image-9.png) | ![Monochrome](images/new-image-7.png) |
+
 Cycle styles with `s` in terminal mode or `cavibe ctl style next` in wallpaper mode.
 
 Auto-rotate through all styles:
@@ -33,16 +41,22 @@ cavibe --rotate --rotate-interval 15
 | **Purple** | Magenta/pink |
 | **Monochrome** | Grayscale intensity |
 
+| Spectrum | Purple | Fire |
+|----------|--------|------|
+| ![Spectrum](images/new-image-2.png) | ![Purple](images/new-image-1.png) | ![Fire](images/new-image-8.png) |
+
 Cycle colors with `c` in terminal mode or `cavibe ctl color next` in wallpaper mode.
 
 ## Font Styles
 
 | Style | Description |
 |-------|-------------|
-| **Normal** | Standard size text (scale 3x in wallpaper mode) |
-| **Bold** | Larger text with thicker strokes (scale 4x with multi-pass rendering) |
-| **Ascii** | Smaller, compact text (scale 2x) |
-| **Figlet** | Large banner-style text with outline effect (scale 5x) |
+| **Normal** | Standard size text |
+| **Bold** | Larger text with thicker strokes |
+| **Ascii** | Smaller, compact text |
+| **Figlet** | Large banner-style text with outline effect |
+
+Text scales proportionally with the surface size — smaller wallpaper surfaces get smaller text, larger surfaces get larger text.
 
 ```bash
 cavibe --font-style figlet

@@ -10,10 +10,13 @@
 use anyhow::{Context, Result};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
-    delegate_compositor, delegate_layer, delegate_output, delegate_registry, delegate_shm,
+    delegate_compositor, delegate_layer, delegate_output, delegate_pointer, delegate_registry,
+    delegate_seat, delegate_shm,
     output::{OutputHandler, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
+    seat::{Capability, SeatHandler, SeatState},
+    seat::pointer::{PointerEvent, PointerEventKind, PointerHandler, BTN_LEFT},
     shell::{
         wlr_layer::{
             Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
@@ -32,17 +35,30 @@ use std::time::{Duration, Instant};
 use tracing::info;
 use wayland_client::{
     globals::registry_queue_init,
-    protocol::{wl_output, wl_shm, wl_surface},
+    protocol::{wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
     Connection, Proxy, QueueHandle,
 };
 
 use crate::audio::{self, AudioCapture, AudioData};
 use crate::color::ColorScheme;
-use crate::config::{Config, FontStyle, MultiMonitorMode, TextAlignment, TextAnimation, TextConfig, TextPosition, WallpaperAnchor};
-use crate::ipc::IpcCommand;
+use crate::config::{Config, MultiMonitorMode, WallpaperAnchor, WallpaperLayer};
+use crate::ipc::{IpcCommand, PendingChanges};
 use crate::metadata::{self, TrackInfo};
-use crate::visualizer::{VisualizerState, VISUALIZER_STYLES};
+use crate::renderer;
+use crate::visualizer::VisualizerState;
 use tokio::sync::{mpsc, watch};
+
+impl WallpaperLayer {
+    /// Convert to layer-shell Layer type
+    pub fn to_layer_shell_layer(self) -> Layer {
+        match self {
+            WallpaperLayer::Background => Layer::Background,
+            WallpaperLayer::Bottom => Layer::Bottom,
+            WallpaperLayer::Top => Layer::Top,
+            WallpaperLayer::Overlay => Layer::Overlay,
+        }
+    }
+}
 
 impl WallpaperAnchor {
     /// Convert to layer-shell Anchor bitflags
@@ -62,27 +78,23 @@ impl WallpaperAnchor {
     }
 }
 
-/// Options for rendering the visualizer
-struct RenderOptions<'a> {
-    // Visualizer settings
-    style: usize,
-    bar_width: usize,
-    bar_spacing: usize,
-    mirror: bool,
-    reverse_mirror: bool,
-    opacity: f32,
-    color_scheme: &'a ColorScheme,
-    waveform: &'a [f32],
-    spectrogram_history: &'a [Vec<f32>],
-
-    // Text settings
-    text_config: &'a TextConfig,
-}
-
 /// An audio capture pipeline with its receiver
 struct AudioPipeline {
     _capture: AudioCapture,
     rx: watch::Receiver<Arc<AudioData>>,
+}
+
+/// State for drag-to-move interaction
+#[derive(Default)]
+struct DragState {
+    is_dragging: bool,
+    last_x: f64,
+    last_y: f64,
+    /// Accumulated drag delta to apply in the main loop
+    pending_dx: f64,
+    pending_dy: f64,
+    /// Whether to save margins (set on release)
+    save_pending: bool,
 }
 
 /// Per-output surface state
@@ -105,6 +117,8 @@ struct OutputSurface {
     audio_data: Arc<AudioData>,       // Cached per-surface audio data
     // Spectrogram history (rolling buffer of frequency snapshots)
     spectrogram_history: Vec<Vec<f32>>,
+    // Reusable pixel canvas (RGBA)
+    canvas: renderer::Canvas,
 }
 
 /// Wayland layer-shell wallpaper renderer with multi-monitor support
@@ -115,6 +129,9 @@ struct WallpaperState {
     compositor_state: CompositorState,
     shm: Shm,
     layer_shell: LayerShell,
+    seat_state: Option<SeatState>,
+    pointer: Option<wl_pointer::WlPointer>,
+    drag: DragState,
 
     // Per-output surfaces, keyed by wl_output ObjectId
     surfaces: HashMap<wayland_client::backend::ObjectId, OutputSurface>,
@@ -156,6 +173,9 @@ impl WallpaperState {
             compositor_state,
             shm,
             layer_shell,
+            seat_state: None,
+            pointer: None,
+            drag: DragState::default(),
             surfaces: HashMap::new(),
             visualizer,
             color_scheme,
@@ -207,7 +227,7 @@ impl WallpaperState {
             for monitor_cfg in &self.config.wallpaper.monitors {
                 if monitor_cfg.output == *name {
                     let style_idx = monitor_cfg.style.as_ref().and_then(|s| {
-                        VISUALIZER_STYLES.iter().position(|vs| vs.name().eq_ignore_ascii_case(s))
+                        renderer::styles::STYLE_NAMES.iter().position(|&name| name.eq_ignore_ascii_case(s))
                     });
                     return (monitor_cfg.color_scheme, style_idx, monitor_cfg.opacity, monitor_cfg.audio_source.clone());
                 }
@@ -219,6 +239,11 @@ impl WallpaperState {
 
     /// Create a layer surface for a specific output
     fn create_surface_for_output(&mut self, qh: &QueueHandle<Self>, output: &wl_output::WlOutput) {
+        // Skip if we already have a surface for this output
+        if self.surfaces.contains_key(&output.id()) {
+            return;
+        }
+
         let output_info = self.output_state.info(output);
         let output_name = output_info.as_ref().and_then(|i| i.name.clone());
 
@@ -242,7 +267,7 @@ impl WallpaperState {
         let layer_surface = self.layer_shell.create_layer_surface(
             qh,
             wl_surface,
-            Layer::Background,
+            self.config.wallpaper.layer.to_layer_shell_layer(),
             Some("cavibe-wallpaper"),
             Some(output),
         );
@@ -255,21 +280,28 @@ impl WallpaperState {
         let (top, right, bottom, left) = self.config.wallpaper.effective_margins();
         layer_surface.set_margin(top, right, bottom, left);
 
-        // Set explicit size if configured (not fullscreen)
-        let explicit_size = if self.config.wallpaper.anchor != WallpaperAnchor::Fullscreen {
-            if let Some((w, h)) = self.config.wallpaper.get_size(screen_w, screen_h) {
-                layer_surface.set_size(w, h);
-                info!("Explicit size set to: {}x{}", w, h);
-                Some((w, h))
-            } else {
-                None
-            }
+        // Set size for non-fullscreen anchors.
+        // Layer-shell requires explicit width when LEFT+RIGHT aren't both set,
+        // and explicit height when TOP+BOTTOM aren't both set.
+        let needs_width = !anchor.contains(Anchor::LEFT | Anchor::RIGHT);
+        let needs_height = !anchor.contains(Anchor::TOP | Anchor::BOTTOM);
+        let explicit_size = if needs_width || needs_height {
+            let configured = self.config.wallpaper.get_size(screen_w, screen_h);
+            let (w, h) = configured.unwrap_or((screen_w / 2, screen_h / 2));
+            layer_surface.set_size(w, h);
+            info!("Explicit size set to: {}x{}", w, h);
+            Some((w, h))
         } else {
             None
         };
 
         layer_surface.set_exclusive_zone(-1); // Don't reserve space
-        layer_surface.set_keyboard_interactivity(KeyboardInteractivity::None);
+        let interactivity = if self.config.wallpaper.draggable {
+            KeyboardInteractivity::OnDemand
+        } else {
+            KeyboardInteractivity::None
+        };
+        layer_surface.set_keyboard_interactivity(interactivity);
 
         // Commit to get the configure event
         layer_surface.commit();
@@ -293,6 +325,7 @@ impl WallpaperState {
             audio_source_key: audio_source,
             audio_data: Arc::new(AudioData::default()),
             spectrogram_history: Vec::new(),
+            canvas: renderer::Canvas::new(0, 0),
         };
 
         self.surfaces.insert(output.id(), surface);
@@ -407,7 +440,10 @@ impl WallpaperState {
             surface.spectrogram_history.drain(..excess);
         }
 
-        let render_opts = RenderOptions {
+        // Resize the per-surface canvas
+        surface.canvas.resize(width, height);
+
+        let render_params = renderer::RenderParams {
             style,
             bar_width,
             bar_spacing,
@@ -420,15 +456,17 @@ impl WallpaperState {
             text_config: &self.config.text,
         };
 
-        let mut cvs = Canvas { data: canvas, width, height };
-        let frame_data = FrameData {
+        let frame_data = renderer::FrameData {
             frequencies: &frequencies,
             intensity,
             track_title: &track_title,
             track_artist: &track_artist,
             time,
         };
-        render_to_buffer(&mut cvs, &frame_data, &render_opts);
+        renderer::render_frame(&mut surface.canvas, &frame_data, &render_params);
+
+        // Convert RGBA to ARGB8888 for Wayland
+        surface.canvas.write_argb8888(canvas);
 
         // Attach and commit
         let wl_surf = surface.layer_surface.wl_surface();
@@ -454,787 +492,158 @@ impl WallpaperState {
         self.time += dt;
         self.visualizer.update(dt);
     }
-}
 
-/// Mutable pixel buffer with dimensions
-struct Canvas<'a> {
-    data: &'a mut [u8],
-    width: usize,
-    height: usize,
-}
-
-impl Canvas<'_> {
-    /// Write a pixel with pre-multiplied alpha
-    #[inline]
-    fn put_pixel(&mut self, x: usize, y: usize, r: u8, g: u8, b: u8, opacity: f32) {
-        let idx = (y * self.width + x) * 4;
-        if idx + 3 < self.data.len() {
-            self.data[idx] = (b as f32 * opacity) as u8;
-            self.data[idx + 1] = (g as f32 * opacity) as u8;
-            self.data[idx + 2] = (r as f32 * opacity) as u8;
-            self.data[idx + 3] = (opacity * 255.0) as u8;
-        }
-    }
-}
-
-/// Per-frame data for text rendering
-struct FrameData<'a> {
-    frequencies: &'a [f32],
-    intensity: f32,
-    track_title: &'a Option<String>,
-    track_artist: &'a Option<String>,
-    time: f32,
-}
-
-/// Render visualizer to an ARGB8888 buffer
-fn render_to_buffer(canvas: &mut Canvas, frame: &FrameData, opts: &RenderOptions) {
-    // Clear to fully transparent (let wallpaper show through)
-    canvas.data.fill(0);
-
-    // Render bars
-    render_bars(canvas, frame.frequencies, opts);
-
-    // Render text
-    render_text(canvas, frame, opts);
-}
-
-/// Compute bar layout shared by all styles: text area, slot dimensions, frequency mapping
-struct BarLayout {
-    bars_y_start: usize,
-    bars_height: usize,
-    start_x: usize,
-    slot_width: usize,
-    displayable: usize,
-    render_frequencies: Vec<f32>,
-}
-
-fn compute_bar_layout(
-    width: usize,
-    height: usize,
-    frequencies: &[f32],
-    opts: &RenderOptions,
-) -> Option<BarLayout> {
-    if frequencies.is_empty() {
-        return None;
-    }
-
-    let bar_count = frequencies.len().min(width);
-    let text_height = if opts.text_config.show_title || opts.text_config.show_artist {
-        60 + opts.text_config.margin_top as usize + opts.text_config.margin_bottom as usize
-    } else {
-        0
-    };
-
-    let (bars_y_start, bars_height) = match opts.text_config.position {
-        TextPosition::Top => (text_height, height.saturating_sub(text_height)),
-        TextPosition::Bottom => (0, height.saturating_sub(text_height)),
-        TextPosition::Center | TextPosition::Coordinates { .. } => (0, height),
-    };
-
-    if bars_height == 0 {
-        return None;
-    }
-
-    let slot_width = opts.bar_width + opts.bar_spacing;
-    let max_bars = width / slot_width.max(1);
-    let displayable = max_bars.min(bar_count);
-
-    if displayable == 0 {
-        return None;
-    }
-
-    let total_width = displayable * slot_width;
-    let start_x = (width.saturating_sub(total_width)) / 2;
-
-    let render_frequencies: Vec<f32> = match (opts.mirror, opts.reverse_mirror) {
-        (true, true) => {
-            let half = displayable / 2;
-            let mut result = Vec::with_capacity(displayable);
-            for i in 0..half {
-                let freq_idx = ((half - 1 - i) * frequencies.len()) / half.max(1);
-                result.push(frequencies[freq_idx.min(frequencies.len() - 1)]);
-            }
-            for i in 0..displayable - half {
-                let freq_idx = (i * frequencies.len()) / (displayable - half).max(1);
-                result.push(frequencies[freq_idx.min(frequencies.len() - 1)]);
-            }
-            result
-        }
-        (true, false) => {
-            let half = displayable / 2;
-            let mut result = Vec::with_capacity(displayable);
-            for i in 0..half {
-                let freq_idx = (i * frequencies.len()) / half.max(1);
-                result.push(frequencies[freq_idx.min(frequencies.len() - 1)]);
-            }
-            for i in 0..displayable - half {
-                let freq_idx = ((displayable - half - 1 - i) * frequencies.len()) / (displayable - half).max(1);
-                result.push(frequencies[freq_idx.min(frequencies.len() - 1)]);
-            }
-            result
-        }
-        (false, true) => {
-            (0..displayable)
-                .map(|i| {
-                    let freq_idx = ((displayable - 1 - i) * frequencies.len()) / displayable.max(1);
-                    frequencies[freq_idx.min(frequencies.len() - 1)]
-                })
-                .collect()
-        }
-        (false, false) => {
-            (0..displayable)
-                .map(|i| {
-                    let freq_idx = (i * frequencies.len()) / displayable.max(1);
-                    frequencies[freq_idx.min(frequencies.len() - 1)]
-                })
-                .collect()
-        }
-    };
-
-    Some(BarLayout { bars_y_start, bars_height, start_x, slot_width, displayable, render_frequencies })
-}
-
-fn render_bars(
-    canvas: &mut Canvas,
-    frequencies: &[f32],
-    opts: &RenderOptions,
-) {
-    let layout = match compute_bar_layout(canvas.width, canvas.height, frequencies, opts) {
-        Some(l) => l,
-        None => return,
-    };
-
-    match opts.style {
-        1 => render_bars_mirrored(canvas, &layout, opts),
-        2 => render_bars_wave(canvas, &layout, opts),
-        3 => render_bars_dots(canvas, &layout, opts),
-        4 => render_bars_blocks(canvas, &layout, opts),
-        5 => render_bars_oscilloscope(canvas, &layout, opts),
-        6 => render_bars_spectrogram(canvas, &layout, opts),
-        7 => render_bars_radial(canvas, &layout, opts),
-        _ => render_bars_classic(canvas, &layout, opts),
-    }
-}
-
-/// Style 0: Classic vertical bars from bottom
-fn render_bars_classic(canvas: &mut Canvas, layout: &BarLayout, opts: &RenderOptions) {
-    for i in 0..layout.displayable {
-        let magnitude = layout.render_frequencies[i];
-        let bar_height = (magnitude * layout.bars_height as f32) as usize;
-        let x_start = layout.start_x + i * layout.slot_width;
-        let position = i as f32 / layout.displayable as f32;
-
-        for y_offset in 0..bar_height.min(layout.bars_height) {
-            let y = layout.bars_y_start + layout.bars_height - 1 - y_offset;
-            let intensity = y_offset as f32 / layout.bars_height as f32;
-            let (r, g, b) = opts.color_scheme.get_color(position, intensity);
-
-            for bx in 0..opts.bar_width {
-                let x = x_start + bx;
-                if x < canvas.width && y < canvas.height {
-                    canvas.put_pixel(x, y, r, g, b, opts.opacity);
-                }
-            }
-        }
-    }
-}
-
-/// Style 1: Mirrored bars growing from center
-fn render_bars_mirrored(canvas: &mut Canvas, layout: &BarLayout, opts: &RenderOptions) {
-    let center_y = layout.bars_y_start + layout.bars_height / 2;
-
-    for i in 0..layout.displayable {
-        let magnitude = layout.render_frequencies[i];
-        let half_height = (magnitude * layout.bars_height as f32 / 2.0) as usize;
-        let x_start = layout.start_x + i * layout.slot_width;
-        let position = i as f32 / layout.displayable as f32;
-
-        for y_offset in 0..half_height.min(layout.bars_height / 2) {
-            let intensity = y_offset as f32 / (layout.bars_height as f32 / 2.0);
-            let (r, g, b) = opts.color_scheme.get_color(position, intensity);
-
-            // Upper half
-            let y_up = center_y.saturating_sub(y_offset);
-            if y_up >= layout.bars_y_start {
-                for bx in 0..opts.bar_width {
-                    let x = x_start + bx;
-                    if x < canvas.width && y_up < canvas.height {
-                        canvas.put_pixel(x, y_up, r, g, b, opts.opacity);
-                    }
-                }
-            }
-
-            // Lower half
-            let y_down = center_y + y_offset;
-            if y_down < layout.bars_y_start + layout.bars_height {
-                for bx in 0..opts.bar_width {
-                    let x = x_start + bx;
-                    if x < canvas.width && y_down < canvas.height {
-                        canvas.put_pixel(x, y_down, r, g, b, opts.opacity);
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Style 2: Wave centered on middle row
-fn render_bars_wave(canvas: &mut Canvas, layout: &BarLayout, opts: &RenderOptions) {
-    let center_y = layout.bars_y_start + layout.bars_height / 2;
-    // Use a narrower bar for wave style
-    let wave_width = (opts.bar_width / 3).max(1);
-
-    for i in 0..layout.displayable {
-        let magnitude = layout.render_frequencies[i];
-        let wave_height = (magnitude * layout.bars_height as f32 / 2.0) as isize;
-        let x_start = layout.start_x + i * layout.slot_width;
-        let position = i as f32 / layout.displayable as f32;
-
-        for offset in -wave_height..=wave_height {
-            let y = (center_y as isize + offset) as usize;
-            if y >= layout.bars_y_start && y < layout.bars_y_start + layout.bars_height && y < canvas.height {
-                let intensity = 1.0 - (offset.unsigned_abs() as f32 / wave_height.max(1) as f32);
-                let (r, g, b) = opts.color_scheme.get_color(position, intensity);
-
-                for bx in 0..wave_width {
-                    let x = x_start + bx;
-                    if x < canvas.width {
-                        canvas.put_pixel(x, y, r, g, b, opts.opacity * intensity);
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Style 3: Dots at peak with trailing dots below
-fn render_bars_dots(canvas: &mut Canvas, layout: &BarLayout, opts: &RenderOptions) {
-    let dot_radius = (opts.bar_width / 3).max(2);
-
-    for i in 0..layout.displayable {
-        let magnitude = layout.render_frequencies[i];
-        let peak_y = layout.bars_y_start + layout.bars_height - 1
-            - (magnitude * (layout.bars_height - 1) as f32) as usize;
-        let x_center = layout.start_x + i * layout.slot_width + opts.bar_width / 2;
-        let position = i as f32 / layout.displayable as f32;
-        let (r, g, b) = opts.color_scheme.get_color(position, magnitude);
-
-        // Draw dot (filled circle)
-        let r2 = (dot_radius * dot_radius) as isize;
-        for dy in -(dot_radius as isize)..=(dot_radius as isize) {
-            for dx in -(dot_radius as isize)..=(dot_radius as isize) {
-                if dx * dx + dy * dy <= r2 {
-                    let x = (x_center as isize + dx) as usize;
-                    let y = (peak_y as isize + dy) as usize;
-                    if x < canvas.width && y >= layout.bars_y_start && y < layout.bars_y_start + layout.bars_height && y < canvas.height {
-                        canvas.put_pixel(x, y, r, g, b, opts.opacity);
-                    }
-                }
-            }
+    /// Convert current anchor to top-left for drag positioning.
+    /// Calculates equivalent margin_left/margin_top to preserve the surface position.
+    fn convert_to_topleft_anchor(&mut self) {
+        if self.config.wallpaper.anchor == WallpaperAnchor::TopLeft {
+            return;
         }
 
-        // Draw trail below dot
-        let trail_width = (opts.bar_width / 4).max(1);
-        let trail_start = peak_y + dot_radius + 1;
-        let trail_end = layout.bars_y_start + layout.bars_height;
-        for y in trail_start..trail_end {
-            let trail_intensity = 1.0 - ((y - trail_start) as f32 / (layout.bars_height as f32 / 2.0));
-            if trail_intensity <= 0.0 {
-                break;
-            }
-            let (tr, tg, tb) = opts.color_scheme.get_color(position, trail_intensity * magnitude);
-            for bx in 0..trail_width {
-                let x = x_center - trail_width / 2 + bx;
-                if x < canvas.width && y < canvas.height {
-                    canvas.put_pixel(x, y, tr, tg, tb, opts.opacity * trail_intensity);
-                }
-            }
-        }
-    }
-}
+        // Get the first surface's dimensions to calculate position
+        let Some(surface) = self.surfaces.values().next() else { return };
+        let sw = surface.screen_width as i32;
+        let sh = surface.screen_height as i32;
+        let w = surface.width as i32;
+        let h = surface.height as i32;
+        let (mt, mr, mb, ml) = self.config.wallpaper.effective_margins();
 
-/// Style 4: Blocks with gradient fade at top edge
-fn render_bars_blocks(canvas: &mut Canvas, layout: &BarLayout, opts: &RenderOptions) {
-    let fade_height = (opts.bar_width / 2).max(2);
-
-    for i in 0..layout.displayable {
-        let magnitude = layout.render_frequencies[i];
-        let bar_height_f = magnitude * layout.bars_height as f32;
-        let bar_height = bar_height_f as usize;
-        let fractional = bar_height_f - bar_height as f32;
-        let x_start = layout.start_x + i * layout.slot_width;
-        let position = i as f32 / layout.displayable as f32;
-
-        // Draw solid portion
-        for y_offset in 0..bar_height.min(layout.bars_height) {
-            let y = layout.bars_y_start + layout.bars_height - 1 - y_offset;
-            let intensity = y_offset as f32 / layout.bars_height as f32;
-            let (r, g, b) = opts.color_scheme.get_color(position, intensity);
-
-            for bx in 0..opts.bar_width {
-                let x = x_start + bx;
-                if x < canvas.width && y < canvas.height {
-                    canvas.put_pixel(x, y, r, g, b, opts.opacity);
-                }
-            }
-        }
-
-        // Draw gradient fade at top edge
-        if bar_height < layout.bars_height {
-            let top_y = layout.bars_y_start + layout.bars_height - 1 - bar_height;
-            let intensity = bar_height as f32 / layout.bars_height as f32;
-            let (r, g, b) = opts.color_scheme.get_color(position, intensity);
-
-            for fy in 0..fade_height.min(top_y.saturating_sub(layout.bars_y_start)) {
-                let y = top_y - fy;
-                let fade = fractional * (1.0 - fy as f32 / fade_height as f32);
-                if y < canvas.height {
-                    for bx in 0..opts.bar_width {
-                        let x = x_start + bx;
-                        if x < canvas.width {
-                            canvas.put_pixel(x, y, r, g, b, opts.opacity * fade);
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Style 5: Oscilloscope — raw waveform as a continuous line
-fn render_bars_oscilloscope(canvas: &mut Canvas, layout: &BarLayout, opts: &RenderOptions) {
-    if opts.waveform.is_empty() {
-        return;
-    }
-
-    let num_samples = opts.waveform.len();
-    let center_y = layout.bars_y_start + layout.bars_height / 2;
-    let half_height = layout.bars_height as f32 / 2.0;
-    // Line thickness in pixels
-    let thickness = (opts.bar_width / 4).max(1);
-
-    let mut prev_y: Option<usize> = None;
-
-    for x in 0..canvas.width {
-        // Map pixel x to sample index
-        let sample_idx = (x * num_samples) / canvas.width;
-        let sample = opts.waveform[sample_idx.min(num_samples - 1)];
-
-        // Map sample (-1..1) to pixel y within bar area
-        let y = ((center_y as f32 - sample * half_height) as usize)
-            .max(layout.bars_y_start)
-            .min(layout.bars_y_start + layout.bars_height - 1);
-
-        let position = x as f32 / canvas.width as f32;
-        let intensity = sample.abs().min(1.0);
-        let (r, g, b) = opts.color_scheme.get_color(position, intensity.max(0.3));
-
-        // Fill vertically between prev_y and y for smooth connections
-        let y_min;
-        let y_max;
-        if let Some(py) = prev_y {
-            y_min = py.min(y);
-            y_max = py.max(y);
-        } else {
-            y_min = y;
-            y_max = y;
-        }
-
-        for fill_y in y_min..=y_max {
-            for t in 0..thickness {
-                let px = x;
-                let py = fill_y + t;
-                if px < canvas.width && py >= layout.bars_y_start && py < layout.bars_y_start + layout.bars_height && py < canvas.height {
-                    canvas.put_pixel(px, py, r, g, b, opts.opacity);
-                }
-            }
-        }
-
-        prev_y = Some(y);
-    }
-}
-
-/// Style 6: Spectrogram — scrolling 2D heatmap (X=frequency, Y=time)
-fn render_bars_spectrogram(canvas: &mut Canvas, layout: &BarLayout, opts: &RenderOptions) {
-    let history = opts.spectrogram_history;
-    if history.is_empty() {
-        return;
-    }
-
-    let num_rows = history.len().min(layout.bars_height);
-
-    for (row_idx, slice) in history.iter().rev().take(num_rows).enumerate() {
-        // row_idx 0 = newest (bottom), so draw from bottom up
-        let y = layout.bars_y_start + layout.bars_height - 1 - row_idx;
-        if y >= layout.bars_y_start + layout.bars_height {
-            continue;
-        }
-
-        let num_freqs = slice.len();
-        if num_freqs == 0 {
-            continue;
-        }
-
-        for x in 0..canvas.width {
-            let freq_idx = (x * num_freqs) / canvas.width;
-            let magnitude = slice[freq_idx.min(num_freqs - 1)];
-            let position = x as f32 / canvas.width as f32;
-            let (r, g, b) = opts.color_scheme.get_color(position, magnitude);
-            canvas.put_pixel(x, y, r, g, b, opts.opacity * magnitude.max(0.05));
-        }
-    }
-}
-
-/// Style 7: Radial — frequency bars radiating outward from a circle
-fn render_bars_radial(canvas: &mut Canvas, layout: &BarLayout, opts: &RenderOptions) {
-    let cx = canvas.width as f32 / 2.0;
-    let cy = (layout.bars_y_start as f32) + layout.bars_height as f32 / 2.0;
-    let half_dim = (canvas.width.min(layout.bars_height) as f32) / 2.0;
-    let base_radius = half_dim * 0.35;
-    let max_radius = half_dim * 0.95;
-    let thickness = (opts.bar_width / 3).max(2);
-
-    let bar_count = layout.render_frequencies.len();
-    if bar_count == 0 {
-        return;
-    }
-
-    // Draw base circle
-    let circle_steps = (base_radius * std::f32::consts::TAU).ceil() as usize;
-    for step in 0..circle_steps {
-        let angle = (step as f32 / circle_steps as f32) * std::f32::consts::TAU;
-        let px = (cx + angle.cos() * base_radius).round() as usize;
-        let py = (cy + angle.sin() * base_radius).round() as usize;
-        let position = (angle + std::f32::consts::FRAC_PI_2) / std::f32::consts::TAU;
-        let position = position.rem_euclid(1.0);
-        let (r, g, b) = opts.color_scheme.get_color(position, 0.3);
-        for t in 0..thickness {
-            let tx = px + t;
-            if tx < canvas.width && py >= layout.bars_y_start && py < layout.bars_y_start + layout.bars_height && py < canvas.height {
-                canvas.put_pixel(tx, py, r, g, b, opts.opacity * 0.5);
-            }
-        }
-    }
-
-    // Draw radial bars
-    for i in 0..bar_count {
-        let magnitude = layout.render_frequencies[i];
-        if magnitude < 0.01 {
-            continue;
-        }
-        // Angle: start at top (-PI/2), go clockwise
-        let angle = -std::f32::consts::FRAC_PI_2
-            + (i as f32 / bar_count as f32) * std::f32::consts::TAU;
-        let bar_length = magnitude * (max_radius - base_radius);
-        let position = i as f32 / bar_count as f32;
-
-        // Draw line from base_radius to base_radius + bar_length
-        let steps = (bar_length.ceil() as usize).max(1);
-        let cos_a = angle.cos();
-        let sin_a = angle.sin();
-        for s in 0..=steps {
-            let r_dist = base_radius + (s as f32 / steps as f32) * bar_length;
-            let px = (cx + cos_a * r_dist).round() as isize;
-            let py_val = (cy + sin_a * r_dist).round() as isize;
-            let intensity = (r_dist - base_radius) / (max_radius - base_radius);
-            let (r, g, b) = opts.color_scheme.get_color(position, magnitude * 0.5 + intensity * 0.5);
-
-            // Draw with thickness perpendicular to the radial direction
-            for t in -(thickness as isize / 2)..=(thickness as isize / 2) {
-                let tx = (px as f32 - sin_a * t as f32).round() as usize;
-                let ty = (py_val as f32 + cos_a * t as f32).round() as usize;
-                if tx < canvas.width && ty >= layout.bars_y_start && ty < layout.bars_y_start + layout.bars_height && ty < canvas.height {
-                    canvas.put_pixel(tx, ty, r, g, b, opts.opacity);
-                }
-            }
-        }
-    }
-}
-
-fn render_text(canvas: &mut Canvas, frame: &FrameData, opts: &RenderOptions) {
-    let text_config = opts.text_config;
-    let width = canvas.width;
-    let height = canvas.height;
-    let track_title = frame.track_title;
-    let track_artist = frame.track_artist;
-    let intensity = frame.intensity;
-    let time = frame.time;
-
-    // Debug: log text config on first frame (time near 0)
-    if time < 0.1 {
-        info!(
-            "Text config: position={:?}, alignment={:?}, font_style={:?}, animation={:?}, show_title={}, show_artist={}, margins=({},{},{})",
-            text_config.position,
-            text_config.alignment,
-            text_config.font_style,
-            text_config.animation_style,
-            text_config.show_title,
-            text_config.show_artist,
-            text_config.margin_top,
-            text_config.margin_bottom,
-            text_config.margin_horizontal
-        );
-    }
-
-    // Check if we should show text at all
-    if !text_config.show_title && !text_config.show_artist {
-        return;
-    }
-
-    // Build display text and track where title ends for color splitting
-    let (text, title_len) = match (
-        text_config.show_title,
-        text_config.show_artist,
-        track_title,
-        track_artist,
-    ) {
-        (true, true, Some(title), Some(artist)) => {
-            let combined = format!("{} - {}", title, artist);
-            (combined, title.len())
-        }
-        (true, true, Some(title), None) => (title.clone(), title.len()),
-        (true, true, None, Some(artist)) => (artist.clone(), 0),
-        (true, false, Some(title), _) => (title.clone(), title.len()),
-        (false, true, _, Some(artist)) => (artist.clone(), 0),
-        _ => ("cavibe".to_string(), 6),
-    };
-
-    // Scale factor based on font style
-    let scale = match text_config.font_style {
-        FontStyle::Normal => 3,
-        FontStyle::Bold => 4,
-        FontStyle::Ascii => 2,
-        FontStyle::Figlet => 5,
-    };
-
-    let char_width = 8 * scale;
-    let char_height = 8 * scale;
-    let char_spacing = match text_config.font_style {
-        FontStyle::Bold => 2 * scale,
-        _ => scale,
-    };
-
-    let text_area_height = char_height + 20;
-    let margin_h = text_config.margin_horizontal as usize;
-
-    // Calculate text Y position based on position setting
-    let (base_text_y, coord_x_override) = match text_config.position {
-        TextPosition::Top => (text_config.margin_top as usize, None),
-        TextPosition::Bottom => (height.saturating_sub(text_area_height + text_config.margin_bottom as usize), None),
-        TextPosition::Center => ((height.saturating_sub(char_height)) / 2, None),
-        TextPosition::Coordinates { x, y } => (y.resolve(height), Some(x.resolve(width))),
-    };
-
-    let text_width = text.len() * (char_width + char_spacing);
-    let available_width = width.saturating_sub(margin_h * 2);
-
-    // Calculate base X position based on alignment (or coordinate override)
-    let base_start_x = if let Some(cx) = coord_x_override {
-        cx
-    } else {
-        match text_config.alignment {
-            TextAlignment::Left => margin_h,
-            TextAlignment::Center => margin_h + (available_width.saturating_sub(text_width)) / 2,
-            TextAlignment::Right => margin_h + available_width.saturating_sub(text_width),
-        }
-    };
-
-    // Apply scroll animation offset if text is wider than available space
-    let scroll_offset = match text_config.animation_style {
-        TextAnimation::Scroll if text_width > available_width => {
-            let scroll_range = text_width - available_width + margin_h * 2;
-            let scroll_speed = text_config.animation_speed * 30.0;
-            let cycle_time = scroll_range as f32 / scroll_speed;
-            let t = (time % (cycle_time * 2.0)) / cycle_time;
-            let normalized = if t > 1.0 { 2.0 - t } else { t }; // Ping-pong
-            (normalized * scroll_range as f32) as isize
-        }
-        _ => 0,
-    };
-
-    let y = base_text_y + (text_area_height.saturating_sub(char_height)) / 2;
-
-    // Render background if configured
-    if let Some(bg_color) = text_config.background_color {
-        let bg_padding = 10;
-        let bg_x_start = base_start_x.saturating_sub(bg_padding);
-        let bg_x_end = (base_start_x + text_width + bg_padding).min(width);
-        let bg_y_start = base_text_y.saturating_sub(bg_padding);
-        let bg_y_end = (base_text_y + text_area_height + bg_padding).min(height);
-
-        for py in bg_y_start..bg_y_end {
-            for px in bg_x_start..bg_x_end {
-                let idx = (py * width + px) * 4;
-                if idx + 3 < canvas.data.len() {
-                    canvas.data[idx] = (bg_color.b as f32 * opts.opacity) as u8;
-                    canvas.data[idx + 1] = (bg_color.g as f32 * opts.opacity) as u8;
-                    canvas.data[idx + 2] = (bg_color.r as f32 * opts.opacity) as u8;
-                    canvas.data[idx + 3] = (opts.opacity * 255.0 * 0.8) as u8; // Slightly transparent
-                }
-            }
-        }
-    }
-
-    // Get colors for text - support separate title/artist colors
-    let colors: Vec<(u8, u8, u8)> = if text_config.use_color_scheme {
-        // Use animated color scheme gradient
-        opts.color_scheme.get_text_gradient(text.len(), intensity * text_config.pulse_intensity, time * text_config.animation_speed)
-    } else {
-        // Use custom colors with title/artist split
-        let title_color = text_config.title_color.unwrap_or(crate::config::RgbColor { r: 255, g: 255, b: 255 });
-        let artist_color = text_config.artist_color.unwrap_or(crate::config::RgbColor { r: 200, g: 200, b: 200 });
-
-        text.chars().enumerate().map(|(i, _)| {
-            // Title portion uses title_color, after " - " uses artist_color
-            if title_len > 0 && i >= title_len + 3 {
-                (artist_color.r, artist_color.g, artist_color.b)
-            } else {
-                (title_color.r, title_color.g, title_color.b)
-            }
-        }).collect()
-    };
-
-    for (i, ch) in text.chars().enumerate() {
-        let base_x = (base_start_x as isize - scroll_offset + (i * (char_width + char_spacing)) as isize) as usize;
-
-        // Apply animation effects per character
-        let (char_x, char_y, char_opacity) = match text_config.animation_style {
-            TextAnimation::Wave => {
-                let wave_offset = ((time * text_config.animation_speed * 3.0 + i as f32 * 0.3).sin() * 8.0) as isize;
-                (base_x, (y as isize + wave_offset).max(0) as usize, opts.opacity)
-            }
-            TextAnimation::Pulse => {
-                let pulse = 0.7 + 0.3 * (intensity * text_config.pulse_intensity);
-                (base_x, y, opts.opacity * pulse)
-            }
-            TextAnimation::Fade => {
-                let fade = 0.5 + 0.5 * ((time * text_config.animation_speed).sin() * 0.5 + 0.5);
-                (base_x, y, opts.opacity * fade)
-            }
-            TextAnimation::Scroll | TextAnimation::None => {
-                (base_x, y, opts.opacity)
-            }
+        // Calculate current top-left position based on anchor
+        let (x, y) = match self.config.wallpaper.anchor {
+            WallpaperAnchor::TopLeft => (ml, mt),
+            WallpaperAnchor::Top => ((sw - w) / 2, mt),
+            WallpaperAnchor::TopRight => (sw - w - mr, mt),
+            WallpaperAnchor::Left => (ml, (sh - h) / 2),
+            WallpaperAnchor::Center => ((sw - w) / 2, (sh - h) / 2),
+            WallpaperAnchor::Right => (sw - w - mr, (sh - h) / 2),
+            WallpaperAnchor::BottomLeft => (ml, sh - h - mb),
+            WallpaperAnchor::Bottom => ((sw - w) / 2, sh - h - mb),
+            WallpaperAnchor::BottomRight => (sw - w - mr, sh - h - mb),
+            WallpaperAnchor::Fullscreen => (0, 0),
         };
 
-        // Skip if character is outside visible area
-        if char_x >= width || char_x + char_width > width + char_width {
-            continue;
+        self.config.wallpaper.anchor = WallpaperAnchor::TopLeft;
+        self.config.wallpaper.margin = 0;
+        self.config.wallpaper.margin_top = y;
+        self.config.wallpaper.margin_left = x;
+        self.config.wallpaper.margin_right = 0;
+        self.config.wallpaper.margin_bottom = 0;
+
+        // Apply the new anchor + margins to all surfaces.
+        // Top-left anchor requires explicit size — use current surface dimensions.
+        let anchor = Anchor::TOP | Anchor::LEFT;
+        for surface in self.surfaces.values_mut() {
+            surface.layer_surface.set_anchor(anchor);
+            surface.layer_surface.set_margin(y, 0, 0, x);
+            let (sw, sh) = surface.explicit_size.unwrap_or((surface.width, surface.height));
+            surface.layer_surface.set_size(sw, sh);
+            surface.explicit_size = Some((sw, sh));
+            surface.layer_surface.commit();
         }
 
-        let (r, g, b) = colors.get(i).copied().unwrap_or((255, 255, 255));
-
-        // Render with font style variations
-        match text_config.font_style {
-            FontStyle::Bold => {
-                // Render with slight offset for bold effect
-                render_char(canvas, char_x, char_y, ch, r, g, b, scale, char_opacity);
-                render_char(canvas, char_x + 1, char_y, ch, r, g, b, scale, char_opacity);
-                render_char(canvas, char_x, char_y + 1, ch, r, g, b, scale, char_opacity);
+        // Also store size in config so it persists
+        if self.config.wallpaper.width.is_none() || self.config.wallpaper.height.is_none() {
+            if let Some(surface) = self.surfaces.values().next() {
+                if let Some((w, h)) = surface.explicit_size {
+                    self.config.wallpaper.width = Some(w.to_string());
+                    self.config.wallpaper.height = Some(h.to_string());
+                }
             }
-            FontStyle::Figlet => {
-                // Render with outline for figlet-like effect
-                let outline_color = (r / 3, g / 3, b / 3);
-                for ox in [0isize, 2].iter() {
-                    for oy in [0isize, 2].iter() {
-                        if *ox != 1 || *oy != 1 {
-                            render_char(canvas,
-                                (char_x as isize + ox) as usize,
-                                (char_y as isize + oy) as usize,
-                                ch, outline_color.0, outline_color.1, outline_color.2,
-                                scale, char_opacity * 0.5);
+        }
+
+        info!("Converted to top-left anchor for drag: position ({}, {})", x, y);
+    }
+
+    /// Apply a drag delta (in surface-local pixels) to the margins.
+    /// Requires top-left anchor (call convert_to_topleft_anchor first).
+    fn apply_drag_delta(&mut self, dx: f64, dy: f64) {
+        self.config.wallpaper.margin_left += dx as i32;
+        self.config.wallpaper.margin_top += dy as i32;
+
+        let mt = self.config.wallpaper.margin_top;
+        let ml = self.config.wallpaper.margin_left;
+        for surface in self.surfaces.values() {
+            surface.layer_surface.set_margin(mt, 0, 0, ml);
+            surface.layer_surface.commit();
+        }
+    }
+
+    /// Save current state to the config file (style, color, layer, position, etc.)
+    /// Creates the config file from the default template if it doesn't exist.
+    fn save_state_to_config(&self) {
+        let Some(path) = Config::default_path() else {
+            return;
+        };
+
+        // Create config from template if it doesn't exist
+        if !path.exists() {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let template = Config::generate_config_template();
+            if std::fs::write(&path, &template).is_err() {
+                tracing::warn!("Failed to create config file at {}", path.display());
+                return;
+            }
+            info!("Created config file at {}", path.display());
+        }
+
+        match std::fs::read_to_string(&path) {
+            Ok(content) => {
+                match content.parse::<toml_edit::DocumentMut>() {
+                    Ok(mut doc) => {
+                        // Ensure [visualizer] section exists
+                        if !doc.contains_key("visualizer") {
+                            doc["visualizer"] = toml_edit::table();
                         }
+                        doc["visualizer"]["style"] = toml_edit::value(self.visualizer.current_style_name().to_lowercase());
+                        doc["visualizer"]["color_scheme"] = toml_edit::value(self.color_scheme.name().to_lowercase());
+                        doc["visualizer"]["opacity"] = toml_edit::value(self.config.visualizer.opacity as f64);
+
+                        // Ensure [text] section exists
+                        if !doc.contains_key("text") {
+                            doc["text"] = toml_edit::table();
+                        }
+                        doc["text"]["show_title"] = toml_edit::value(self.config.text.show_title);
+                        doc["text"]["show_artist"] = toml_edit::value(self.config.text.show_artist);
+                        doc["text"]["position"] = toml_edit::value(self.config.text.position.to_string());
+                        doc["text"]["font_style"] = toml_edit::value(format!("{:?}", self.config.text.font_style).to_lowercase());
+                        doc["text"]["animation_style"] = toml_edit::value(format!("{:?}", self.config.text.animation_style).to_lowercase());
+
+                        // Ensure [wallpaper] section exists
+                        if !doc.contains_key("wallpaper") {
+                            doc["wallpaper"] = toml_edit::table();
+                        }
+                        doc["wallpaper"]["layer"] = toml_edit::value(self.config.wallpaper.layer.name());
+                        doc["wallpaper"]["anchor"] = toml_edit::value(self.config.wallpaper.anchor.name());
+                        doc["wallpaper"]["draggable"] = toml_edit::value(self.config.wallpaper.draggable);
+                        doc["wallpaper"]["margin"] = toml_edit::value(self.config.wallpaper.margin as i64);
+                        doc["wallpaper"]["margin_top"] = toml_edit::value(self.config.wallpaper.margin_top as i64);
+                        doc["wallpaper"]["margin_right"] = toml_edit::value(self.config.wallpaper.margin_right as i64);
+                        doc["wallpaper"]["margin_bottom"] = toml_edit::value(self.config.wallpaper.margin_bottom as i64);
+                        doc["wallpaper"]["margin_left"] = toml_edit::value(self.config.wallpaper.margin_left as i64);
+                        if let Some(ref w) = self.config.wallpaper.width {
+                            doc["wallpaper"]["width"] = toml_edit::value(w.as_str());
+                        }
+                        if let Some(ref h) = self.config.wallpaper.height {
+                            doc["wallpaper"]["height"] = toml_edit::value(h.as_str());
+                        }
+
+                        let _ = std::fs::write(&path, doc.to_string());
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to parse config for save: {}", e);
                     }
                 }
-                render_char(canvas, char_x + 1, char_y + 1, ch, r, g, b, scale, char_opacity);
             }
-            FontStyle::Normal | FontStyle::Ascii => {
-                render_char(canvas, char_x, char_y, ch, r, g, b, scale, char_opacity);
+            Err(e) => {
+                tracing::warn!("Failed to read config for save: {}", e);
             }
         }
     }
 }
 
-/// Simple 8x8 bitmap font for basic text rendering
-/// Each character is represented as 8 bytes, one per row
-fn get_char_bitmap(ch: char) -> Option<[u8; 8]> {
-    let ch = ch.to_ascii_uppercase();
-    Some(match ch {
-        'A' => [0x18, 0x24, 0x42, 0x7E, 0x42, 0x42, 0x42, 0x00],
-        'B' => [0x7C, 0x42, 0x7C, 0x42, 0x42, 0x42, 0x7C, 0x00],
-        'C' => [0x3C, 0x42, 0x40, 0x40, 0x40, 0x42, 0x3C, 0x00],
-        'D' => [0x78, 0x44, 0x42, 0x42, 0x42, 0x44, 0x78, 0x00],
-        'E' => [0x7E, 0x40, 0x7C, 0x40, 0x40, 0x40, 0x7E, 0x00],
-        'F' => [0x7E, 0x40, 0x7C, 0x40, 0x40, 0x40, 0x40, 0x00],
-        'G' => [0x3C, 0x42, 0x40, 0x4E, 0x42, 0x42, 0x3C, 0x00],
-        'H' => [0x42, 0x42, 0x7E, 0x42, 0x42, 0x42, 0x42, 0x00],
-        'I' => [0x3E, 0x08, 0x08, 0x08, 0x08, 0x08, 0x3E, 0x00],
-        'J' => [0x1F, 0x04, 0x04, 0x04, 0x04, 0x44, 0x38, 0x00],
-        'K' => [0x42, 0x44, 0x78, 0x48, 0x44, 0x42, 0x42, 0x00],
-        'L' => [0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x7E, 0x00],
-        'M' => [0x42, 0x66, 0x5A, 0x42, 0x42, 0x42, 0x42, 0x00],
-        'N' => [0x42, 0x62, 0x52, 0x4A, 0x46, 0x42, 0x42, 0x00],
-        'O' => [0x3C, 0x42, 0x42, 0x42, 0x42, 0x42, 0x3C, 0x00],
-        'P' => [0x7C, 0x42, 0x42, 0x7C, 0x40, 0x40, 0x40, 0x00],
-        'Q' => [0x3C, 0x42, 0x42, 0x42, 0x4A, 0x44, 0x3A, 0x00],
-        'R' => [0x7C, 0x42, 0x42, 0x7C, 0x48, 0x44, 0x42, 0x00],
-        'S' => [0x3C, 0x42, 0x30, 0x0C, 0x02, 0x42, 0x3C, 0x00],
-        'T' => [0x7F, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x00],
-        'U' => [0x42, 0x42, 0x42, 0x42, 0x42, 0x42, 0x3C, 0x00],
-        'V' => [0x42, 0x42, 0x42, 0x42, 0x24, 0x24, 0x18, 0x00],
-        'W' => [0x42, 0x42, 0x42, 0x5A, 0x5A, 0x66, 0x42, 0x00],
-        'X' => [0x42, 0x24, 0x18, 0x18, 0x24, 0x42, 0x42, 0x00],
-        'Y' => [0x41, 0x22, 0x14, 0x08, 0x08, 0x08, 0x08, 0x00],
-        'Z' => [0x7E, 0x04, 0x08, 0x10, 0x20, 0x40, 0x7E, 0x00],
-        '0' => [0x3C, 0x42, 0x46, 0x5A, 0x62, 0x42, 0x3C, 0x00],
-        '1' => [0x08, 0x18, 0x28, 0x08, 0x08, 0x08, 0x3E, 0x00],
-        '2' => [0x3C, 0x42, 0x02, 0x0C, 0x30, 0x40, 0x7E, 0x00],
-        '3' => [0x3C, 0x42, 0x02, 0x1C, 0x02, 0x42, 0x3C, 0x00],
-        '4' => [0x04, 0x0C, 0x14, 0x24, 0x7E, 0x04, 0x04, 0x00],
-        '5' => [0x7E, 0x40, 0x7C, 0x02, 0x02, 0x42, 0x3C, 0x00],
-        '6' => [0x1C, 0x20, 0x40, 0x7C, 0x42, 0x42, 0x3C, 0x00],
-        '7' => [0x7E, 0x02, 0x04, 0x08, 0x10, 0x10, 0x10, 0x00],
-        '8' => [0x3C, 0x42, 0x42, 0x3C, 0x42, 0x42, 0x3C, 0x00],
-        '9' => [0x3C, 0x42, 0x42, 0x3E, 0x02, 0x04, 0x38, 0x00],
-        ' ' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
-        '-' => [0x00, 0x00, 0x00, 0x7E, 0x00, 0x00, 0x00, 0x00],
-        '.' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x00],
-        ',' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x08, 0x10],
-        '!' => [0x08, 0x08, 0x08, 0x08, 0x08, 0x00, 0x08, 0x00],
-        '?' => [0x3C, 0x42, 0x02, 0x0C, 0x10, 0x00, 0x10, 0x00],
-        ':' => [0x00, 0x18, 0x18, 0x00, 0x18, 0x18, 0x00, 0x00],
-        '\'' => [0x08, 0x08, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00],
-        '"' => [0x24, 0x24, 0x48, 0x00, 0x00, 0x00, 0x00, 0x00],
-        '(' => [0x04, 0x08, 0x10, 0x10, 0x10, 0x08, 0x04, 0x00],
-        ')' => [0x20, 0x10, 0x08, 0x08, 0x08, 0x10, 0x20, 0x00],
-        '&' => [0x30, 0x48, 0x30, 0x50, 0x4A, 0x44, 0x3A, 0x00],
-        _ => return None,
-    })
-}
 
-#[allow(clippy::too_many_arguments)]
-fn render_char(canvas: &mut Canvas, x: usize, y: usize, ch: char, r: u8, g: u8, b: u8, scale: usize, opacity: f32) {
-    let bitmap = match get_char_bitmap(ch) {
-        Some(b) => b,
-        None => return,
-    };
-
-    for (row_idx, &row) in bitmap.iter().enumerate() {
-        for col in 0..8 {
-            if (row >> (7 - col)) & 1 == 1 {
-                // Draw scaled pixel
-                for sy in 0..scale {
-                    for sx in 0..scale {
-                        let px = x + col * scale + sx;
-                        let py = y + row_idx * scale + sy;
-                        if px < canvas.width && py < canvas.height {
-                            canvas.put_pixel(px, py, r, g, b, opacity);
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
 
 // Implement required traits for smithay-client-toolkit
 
@@ -1364,13 +773,11 @@ impl LayerShellHandler for WallpaperState {
             None => return,
         };
 
-        // Use explicit size if configured, otherwise use compositor suggestion
+        // Use explicit size if configured, otherwise use compositor suggestion.
+        // Don't accept compositor shrinking — it reduces suggested size when
+        // margins push the surface near screen edges.
         let (width, height) = if let Some((w, h)) = surface.explicit_size {
-            if suggested_width > 0 && suggested_height > 0 {
-                (suggested_width.min(w), suggested_height.min(h))
-            } else {
-                (w, h)
-            }
+            (w, h)
         } else {
             let w = if suggested_width > 0 { suggested_width } else { surface.screen_width.max(1920) };
             let h = if suggested_height > 0 { suggested_height } else { surface.screen_height.max(1080) };
@@ -1404,6 +811,112 @@ impl ShmHandler for WallpaperState {
     }
 }
 
+impl SeatHandler for WallpaperState {
+    fn seat_state(&mut self) -> &mut SeatState {
+        self.seat_state.as_mut().expect("SeatState not initialized")
+    }
+
+    fn new_seat(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _seat: wl_seat::WlSeat,
+    ) {
+    }
+
+    fn new_capability(
+        &mut self,
+        _conn: &Connection,
+        qh: &QueueHandle<Self>,
+        seat: wl_seat::WlSeat,
+        capability: Capability,
+    ) {
+        if capability == Capability::Pointer && self.pointer.is_none() {
+            if let Some(ref mut seat_state) = self.seat_state {
+                if let Ok(pointer) = seat_state.get_pointer(qh, &seat) {
+                    self.pointer = Some(pointer);
+                    info!("Pointer capability acquired (drag-to-move available)");
+                }
+            }
+        }
+    }
+
+    fn remove_capability(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _seat: wl_seat::WlSeat,
+        capability: Capability,
+    ) {
+        if capability == Capability::Pointer {
+            if let Some(pointer) = self.pointer.take() {
+                pointer.release();
+                self.drag = DragState::default();
+                info!("Pointer capability removed");
+            }
+        }
+    }
+
+    fn remove_seat(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _seat: wl_seat::WlSeat,
+    ) {
+    }
+}
+
+impl PointerHandler for WallpaperState {
+    fn pointer_frame(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _pointer: &wl_pointer::WlPointer,
+        events: &[PointerEvent],
+    ) {
+        if !self.config.wallpaper.draggable {
+            return;
+        }
+
+        for event in events {
+            match event.kind {
+                PointerEventKind::Enter { .. } => {
+                    self.drag.last_x = event.position.0;
+                    self.drag.last_y = event.position.1;
+                }
+                PointerEventKind::Press { button, .. } if button == BTN_LEFT => {
+                    self.drag.is_dragging = true;
+                    self.drag.last_x = event.position.0;
+                    self.drag.last_y = event.position.1;
+                    self.drag.pending_dx = 0.0;
+                    self.drag.pending_dy = 0.0;
+                }
+                PointerEventKind::Motion { .. } if self.drag.is_dragging => {
+                    let dx = event.position.0 - self.drag.last_x;
+                    let dy = event.position.1 - self.drag.last_y;
+                    self.drag.last_x = event.position.0;
+                    self.drag.last_y = event.position.1;
+                    self.drag.pending_dx += dx;
+                    self.drag.pending_dy += dy;
+                }
+                PointerEventKind::Release { button, .. } if button == BTN_LEFT => {
+                    if self.drag.is_dragging {
+                        self.drag.is_dragging = false;
+                        self.drag.save_pending = true;
+                    }
+                }
+                PointerEventKind::Leave { .. } => {
+                    if self.drag.is_dragging {
+                        self.drag.is_dragging = false;
+                        self.drag.save_pending = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 impl ProvidesRegistryState for WallpaperState {
     fn registry(&mut self) -> &mut RegistryState {
         &mut self.registry_state
@@ -1416,6 +929,8 @@ delegate_compositor!(WallpaperState);
 delegate_output!(WallpaperState);
 delegate_layer!(WallpaperState);
 delegate_shm!(WallpaperState);
+delegate_seat!(WallpaperState);
+delegate_pointer!(WallpaperState);
 delegate_registry!(WallpaperState);
 
 /// Run the Wayland layer-shell wallpaper mode
@@ -1440,7 +955,7 @@ pub async fn run(config: Config, ipc_rx: mpsc::Receiver<IpcCommand>) -> Result<(
     let output_state = OutputState::new(&globals, &qh);
     let registry_state = RegistryState::new(&globals);
 
-    // Create state
+    // Create state (without seat — initialized after surfaces are configured)
     let mut state = WallpaperState::new(
         registry_state,
         output_state,
@@ -1483,6 +998,13 @@ pub async fn run(config: Config, ipc_rx: mpsc::Receiver<IpcCommand>) -> Result<(
     let configured_count = state.surfaces.values().filter(|s| s.configured).count();
     let total_count = state.surfaces.len();
     info!("Layer surfaces configured: {}/{} outputs", configured_count, total_count);
+
+    // Initialize seat/pointer for drag-to-move (after surfaces are configured
+    // to avoid interfering with layer surface setup)
+    state.seat_state = Some(SeatState::new(&globals, &qh));
+    event_queue
+        .roundtrip(&mut state)
+        .context("Failed Wayland roundtrip after seat initialization")?;
 
     // Collect unique audio sources across all surfaces
     // Always include None (default) for surfaces without an override
@@ -1585,6 +1107,7 @@ pub async fn run(config: Config, ipc_rx: mpsc::Receiver<IpcCommand>) -> Result<(
         state.update(dt);
 
         // Process IPC commands (non-blocking)
+        let mut pending = PendingChanges::default();
         while let Ok(cmd) = state.ipc_rx.try_recv() {
             // Intercept audio commands before generic handler
             match cmd {
@@ -1631,6 +1154,56 @@ pub async fn run(config: Config, ipc_rx: mpsc::Receiver<IpcCommand>) -> Result<(
                         }
                     }
                 }
+                IpcCommand::ResizeRelative { delta, is_percent, reply } => {
+                    if state.config.wallpaper.anchor == WallpaperAnchor::Fullscreen {
+                        let _ = reply.send("err: cannot resize in fullscreen anchor mode".to_string());
+                    } else if let Some(first_surface) = state.surfaces.values().next() {
+                        let cur_w = first_surface.width as i32;
+                        let cur_h = first_surface.height as i32;
+                        let (new_w, new_h) = if is_percent {
+                            let factor = 1.0 + delta as f64 / 100.0;
+                            ((cur_w as f64 * factor) as i32, (cur_h as f64 * factor) as i32)
+                        } else {
+                            (cur_w + delta, cur_h + delta)
+                        };
+                        let new_w = new_w.max(1) as u32;
+                        let new_h = new_h.max(1) as u32;
+                        // Adjust margins to keep the visual center stable
+                        let dw = new_w as i32 - cur_w;
+                        let dh = new_h as i32 - cur_h;
+                        state.config.wallpaper.margin_left -= dw / 2;
+                        state.config.wallpaper.margin_top -= dh / 2;
+                        state.config.wallpaper.width = Some(new_w.to_string());
+                        state.config.wallpaper.height = Some(new_h.to_string());
+                        pending.surface_update = true;
+                        pending.save_config = true;
+                        let _ = reply.send(format!("ok: {}x{}", new_w, new_h));
+                    } else {
+                        let _ = reply.send("err: no surfaces configured".to_string());
+                    }
+                }
+                IpcCommand::Resize { width, height, reply } => {
+                    if let Some(first_surface) = state.surfaces.values().next() {
+                        let cur_w = first_surface.width as i32;
+                        let cur_h = first_surface.height as i32;
+                        // Resolve the new size to get pixel values for margin adjustment
+                        let screen_w = first_surface.screen_width;
+                        let screen_h = first_surface.screen_height;
+                        state.config.wallpaper.width = Some(width.clone());
+                        state.config.wallpaper.height = Some(height.clone());
+                        if let Some((nw, nh)) = state.config.wallpaper.get_size(screen_w, screen_h) {
+                            let dw = nw as i32 - cur_w;
+                            let dh = nh as i32 - cur_h;
+                            state.config.wallpaper.margin_left -= dw / 2;
+                            state.config.wallpaper.margin_top -= dh / 2;
+                        }
+                        pending.surface_update = true;
+                        pending.save_config = true;
+                        let _ = reply.send(format!("ok: {}x{}", width, height));
+                    } else {
+                        let _ = reply.send("err: no surfaces configured".to_string());
+                    }
+                }
                 cmd => {
                     let mut opacity = state.config.visualizer.opacity;
                     let monitors = state.list_monitors();
@@ -1642,10 +1215,89 @@ pub async fn run(config: Config, ipc_rx: mpsc::Receiver<IpcCommand>) -> Result<(
                         &mut opacity,
                         &mut state.config,
                         &monitors,
+                        &mut pending,
                     );
                     state.config.visualizer.opacity = opacity;
                 }
             }
+        }
+
+        // Handle pending layer change (requires surface recreation)
+        if pending.layer_change {
+            info!("Layer changed to {}, recreating surfaces", state.config.wallpaper.layer.name());
+            // Destroy all existing surfaces
+            state.surfaces.clear();
+            // Recreate surfaces with the new layer
+            state.create_surfaces_for_all_outputs(&qh);
+            // Roundtrip to get configure events for new surfaces
+            let _ = event_queue.roundtrip(&mut state);
+        }
+
+        // Handle pending surface property updates (anchor/margin/size — dynamic)
+        if pending.surface_update && !pending.layer_change {
+            let anchor = state.config.wallpaper.anchor.to_layer_shell_anchor();
+            let (mt, mr, mb, ml) = state.config.wallpaper.effective_margins();
+
+            for surface in state.surfaces.values_mut() {
+                surface.layer_surface.set_anchor(anchor);
+                surface.layer_surface.set_margin(mt, mr, mb, ml);
+
+                // Update size — use same fallback logic as create_surface_for_output
+                let needs_width = !anchor.contains(Anchor::LEFT | Anchor::RIGHT);
+                let needs_height = !anchor.contains(Anchor::TOP | Anchor::BOTTOM);
+                if needs_width || needs_height {
+                    let configured = state.config.wallpaper.get_size(surface.screen_width, surface.screen_height);
+                    let (w, h) = configured.unwrap_or_else(|| {
+                        // Preserve current size if available, otherwise half screen
+                        surface.explicit_size.unwrap_or((surface.screen_width / 2, surface.screen_height / 2))
+                    });
+                    surface.layer_surface.set_size(w, h);
+                    surface.explicit_size = Some((w, h));
+                } else {
+                    // Fullscreen — let compositor decide
+                    surface.layer_surface.set_size(0, 0);
+                    surface.explicit_size = None;
+                }
+
+                surface.layer_surface.commit();
+            }
+        }
+
+        // Apply accumulated drag delta
+        if state.drag.pending_dx != 0.0 || state.drag.pending_dy != 0.0 {
+            let dx = state.drag.pending_dx;
+            let dy = state.drag.pending_dy;
+            state.drag.pending_dx = 0.0;
+            state.drag.pending_dy = 0.0;
+            state.apply_drag_delta(dx, dy);
+        }
+
+        // Save margins after drag release
+        if state.drag.save_pending {
+            state.drag.save_pending = false;
+            state.save_state_to_config();
+        }
+
+        // Handle drag mode change — update keyboard interactivity and anchor
+        if pending.drag_changed {
+            let interactivity = if state.config.wallpaper.draggable {
+                KeyboardInteractivity::OnDemand
+            } else {
+                KeyboardInteractivity::None
+            };
+            for surface in state.surfaces.values() {
+                surface.layer_surface.set_keyboard_interactivity(interactivity);
+                surface.layer_surface.commit();
+            }
+            // Convert to top-left anchor for reliable margin-based positioning
+            if state.config.wallpaper.draggable {
+                state.convert_to_topleft_anchor();
+            }
+        }
+
+        // Save config if state changed via IPC
+        if pending.save_config {
+            state.save_state_to_config();
         }
 
         // Auto-rotate color schemes if enabled

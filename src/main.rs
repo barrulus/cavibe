@@ -8,9 +8,10 @@ mod config;
 mod display;
 mod ipc;
 mod metadata;
+mod renderer;
 mod visualizer;
 
-use config::{Config, FontStyle, MultiMonitorMode, TextAlignment, TextAnimation, TextPosition, WallpaperAnchor};
+use config::{Config, FontStyle, MultiMonitorMode, TextAlignment, TextAnimation, TextPosition, WallpaperAnchor, WallpaperLayer};
 use display::DisplayMode;
 
 #[derive(Parser, Debug)]
@@ -171,6 +172,10 @@ pub struct Args {
     /// Multi-monitor mode: clone or independent
     #[arg(long, value_enum)]
     pub multi_monitor: Option<MultiMonitorMode>,
+
+    /// Wallpaper layer-shell layer: background, bottom, top, overlay
+    #[arg(long, value_enum)]
+    pub wallpaper_layer: Option<WallpaperLayer>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -229,6 +234,31 @@ pub enum CtlAction {
         /// Source name (use "default" to revert to auto-detected)
         name: String,
     },
+    /// Change layer-shell layer
+    Layer {
+        /// Direction or layer name: next, prev, background, bottom, top, overlay
+        value: String,
+    },
+    /// Set wallpaper anchor/position
+    Anchor {
+        /// Position: top-left, top, top-right, left, center, right, bottom-left, bottom, bottom-right, fullscreen
+        position: String,
+    },
+    /// Set wallpaper margins
+    Margin {
+        /// Margins: top right bottom left (e.g. 20 20 20 20)
+        values: Vec<String>,
+    },
+    /// Resize wallpaper
+    Resize {
+        /// Size: WxH (e.g. 800x600, 50%x50%), +50, -50, +10%, -10%
+        size: String,
+    },
+    /// Toggle drag-to-move mode
+    Drag {
+        /// Mode: toggle, on, off
+        mode: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -268,6 +298,11 @@ impl CtlAction {
                 TextAction::Toggle => "text toggle".to_string(),
             },
             CtlAction::SetSource { name } => format!("set source {}", name),
+            CtlAction::Layer { value } => format!("layer {}", value),
+            CtlAction::Anchor { position } => format!("anchor {}", position),
+            CtlAction::Margin { values } => format!("margin {}", values.join(" ")),
+            CtlAction::Resize { size } => format!("resize {}", size),
+            CtlAction::Drag { mode } => format!("drag {}", mode),
         }
     }
 }

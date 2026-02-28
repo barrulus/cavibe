@@ -255,6 +255,65 @@ impl RgbColor {
     }
 }
 
+/// Layer-shell layer for wallpaper rendering
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, ValueEnum, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum WallpaperLayer {
+    #[default]
+    Background,
+    Bottom,
+    Top,
+    Overlay,
+}
+
+impl WallpaperLayer {
+    /// Cycle to the next layer
+    pub fn next(self) -> Self {
+        match self {
+            WallpaperLayer::Background => WallpaperLayer::Bottom,
+            WallpaperLayer::Bottom => WallpaperLayer::Top,
+            WallpaperLayer::Top => WallpaperLayer::Overlay,
+            WallpaperLayer::Overlay => WallpaperLayer::Background,
+        }
+    }
+
+    /// Cycle to the previous layer
+    pub fn prev(self) -> Self {
+        match self {
+            WallpaperLayer::Background => WallpaperLayer::Overlay,
+            WallpaperLayer::Bottom => WallpaperLayer::Background,
+            WallpaperLayer::Top => WallpaperLayer::Bottom,
+            WallpaperLayer::Overlay => WallpaperLayer::Top,
+        }
+    }
+
+    /// Get the display name
+    pub fn name(self) -> &'static str {
+        match self {
+            WallpaperLayer::Background => "background",
+            WallpaperLayer::Bottom => "bottom",
+            WallpaperLayer::Top => "top",
+            WallpaperLayer::Overlay => "overlay",
+        }
+    }
+
+    /// Parse from string
+    pub fn from_name(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "background" => Some(WallpaperLayer::Background),
+            "bottom" => Some(WallpaperLayer::Bottom),
+            "top" => Some(WallpaperLayer::Top),
+            "overlay" => Some(WallpaperLayer::Overlay),
+            _ => None,
+        }
+    }
+
+    /// All layer names
+    pub fn all_names() -> &'static [&'static str] {
+        &["background", "bottom", "top", "overlay"]
+    }
+}
+
 /// Anchor position for wallpaper (9-point grid + fullscreen)
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, ValueEnum, PartialEq)]
 #[serde(rename_all = "kebab-case")]
@@ -270,6 +329,47 @@ pub enum WallpaperAnchor {
     BottomRight,
     #[default]
     Fullscreen, // All edges anchored (current default behavior)
+}
+
+impl WallpaperAnchor {
+    /// Get the kebab-case display name (matches serde format)
+    pub fn name(self) -> &'static str {
+        match self {
+            WallpaperAnchor::TopLeft => "top-left",
+            WallpaperAnchor::Top => "top",
+            WallpaperAnchor::TopRight => "top-right",
+            WallpaperAnchor::Left => "left",
+            WallpaperAnchor::Center => "center",
+            WallpaperAnchor::Right => "right",
+            WallpaperAnchor::BottomLeft => "bottom-left",
+            WallpaperAnchor::Bottom => "bottom",
+            WallpaperAnchor::BottomRight => "bottom-right",
+            WallpaperAnchor::Fullscreen => "fullscreen",
+        }
+    }
+}
+
+impl FromStr for WallpaperAnchor {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_lowercase().replace('_', "-").as_str() {
+            "top-left" | "topleft" => Ok(WallpaperAnchor::TopLeft),
+            "top" => Ok(WallpaperAnchor::Top),
+            "top-right" | "topright" => Ok(WallpaperAnchor::TopRight),
+            "left" => Ok(WallpaperAnchor::Left),
+            "center" => Ok(WallpaperAnchor::Center),
+            "right" => Ok(WallpaperAnchor::Right),
+            "bottom-left" | "bottomleft" => Ok(WallpaperAnchor::BottomLeft),
+            "bottom" => Ok(WallpaperAnchor::Bottom),
+            "bottom-right" | "bottomright" => Ok(WallpaperAnchor::BottomRight),
+            "fullscreen" => Ok(WallpaperAnchor::Fullscreen),
+            _ => Err(format!(
+                "Unknown anchor '{}': expected top-left, top, top-right, left, center, right, bottom-left, bottom, bottom-right, fullscreen",
+                s
+            )),
+        }
+    }
 }
 
 /// Size specification for wallpaper
@@ -341,6 +441,7 @@ impl WallpaperSize {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WallpaperConfig {
+    pub layer: WallpaperLayer,
     pub anchor: WallpaperAnchor,
     pub width: Option<String>,  // "400" or "50%"
     pub height: Option<String>, // "300" or "50%"
@@ -349,6 +450,8 @@ pub struct WallpaperConfig {
     pub margin_right: i32,
     pub margin_bottom: i32,
     pub margin_left: i32,
+    #[serde(default)]
+    pub draggable: bool,
     #[serde(default)]
     pub multi_monitor: MultiMonitorMode,
     #[serde(default)]
@@ -360,6 +463,7 @@ pub struct WallpaperConfig {
 impl Default for WallpaperConfig {
     fn default() -> Self {
         Self {
+            layer: WallpaperLayer::default(),
             anchor: WallpaperAnchor::Fullscreen,
             width: None,
             height: None,
@@ -368,6 +472,7 @@ impl Default for WallpaperConfig {
             margin_right: 0,
             margin_bottom: 0,
             margin_left: 0,
+            draggable: false,
             multi_monitor: MultiMonitorMode::default(),
             outputs: None,
             monitors: Vec::new(),
@@ -577,6 +682,8 @@ margin_horizontal = 2
 use_color_scheme = true
 
 [wallpaper]
+# Layer-shell layer: background, bottom, top, overlay
+layer = "background"
 # Anchor position: fullscreen, center, top, bottom, left, right,
 # top-left, top-right, bottom-left, bottom-right
 anchor = "fullscreen"
@@ -590,6 +697,8 @@ margin = 0
 # margin_right = 0
 # margin_bottom = 0
 # margin_left = 0
+# Enable drag-to-move (left-click drag to reposition; saves margins to config)
+# draggable = false
 # Multi-monitor mode: "clone" (same on all) or "independent" (per-monitor overrides)
 # multi_monitor = "clone"
 # Only show on specific outputs (by name, e.g. "DP-1"):
@@ -723,6 +832,10 @@ margin = 0
             self.wallpaper.margin_right = margin;
             self.wallpaper.margin_bottom = margin;
             self.wallpaper.margin_left = margin;
+        }
+
+        if let Some(layer) = args.wallpaper_layer {
+            self.wallpaper.layer = layer;
         }
 
         // Multi-monitor settings

@@ -6,8 +6,22 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info};
 
 use crate::color::ColorScheme;
-use crate::config::{Config, FontStyle, TextAnimation, TextPosition};
-use crate::visualizer::{VisualizerState, VISUALIZER_STYLES};
+use crate::config::{Config, FontStyle, TextAnimation, TextPosition, WallpaperAnchor, WallpaperLayer, WallpaperSize};
+use crate::renderer::styles::STYLE_NAMES;
+use crate::visualizer::VisualizerState;
+
+/// Pending changes that require action in the render loop
+#[derive(Default)]
+pub struct PendingChanges {
+    /// Layer changed — requires surface recreation
+    pub layer_change: bool,
+    /// Anchor/margin/size changed — can be applied dynamically
+    pub surface_update: bool,
+    /// Drag mode changed — update keyboard interactivity
+    pub drag_changed: bool,
+    /// State changed — save to config file
+    pub save_config: bool,
+}
 
 /// Commands sent from IPC server to render loop
 pub enum IpcCommand {
@@ -29,6 +43,17 @@ pub enum IpcCommand {
     TextToggle { reply: oneshot::Sender<String> },
     ListSources { reply: oneshot::Sender<String> },
     SetSource { name: String, reply: oneshot::Sender<String> },
+    LayerNext { reply: oneshot::Sender<String> },
+    LayerPrev { reply: oneshot::Sender<String> },
+    LayerSet { name: String, reply: oneshot::Sender<String> },
+    ListLayers { reply: oneshot::Sender<String> },
+    AnchorSet { anchor: WallpaperAnchor, reply: oneshot::Sender<String> },
+    MarginSet { top: i32, right: i32, bottom: i32, left: i32, reply: oneshot::Sender<String> },
+    Resize { width: String, height: String, reply: oneshot::Sender<String> },
+    ResizeRelative { delta: i32, is_percent: bool, reply: oneshot::Sender<String> },
+    DragToggle { reply: oneshot::Sender<String> },
+    DragOn { reply: oneshot::Sender<String> },
+    DragOff { reply: oneshot::Sender<String> },
 }
 
 /// Get the socket path for IPC
@@ -91,11 +116,64 @@ fn parse_command(line: &str, reply: oneshot::Sender<String>) -> Result<IpcComman
         ["text", "toggle"] => Ok(IpcCommand::TextToggle { reply }),
         ["list", "sources"] => Ok(IpcCommand::ListSources { reply }),
         ["set", "source", name] => Ok(IpcCommand::SetSource { name: name.to_string(), reply }),
+        ["layer", "next"] => Ok(IpcCommand::LayerNext { reply }),
+        ["layer", "prev"] => Ok(IpcCommand::LayerPrev { reply }),
+        ["layer", name] => {
+            if WallpaperLayer::from_name(name).is_some() {
+                Ok(IpcCommand::LayerSet { name: name.to_string(), reply })
+            } else {
+                Err(anyhow::anyhow!("Unknown layer: {} ({})", name, WallpaperLayer::all_names().join(", ")))
+            }
+        }
+        ["list", "layers"] => Ok(IpcCommand::ListLayers { reply }),
+        ["anchor", pos] => {
+            let anchor: WallpaperAnchor = pos.parse()
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            Ok(IpcCommand::AnchorSet { anchor, reply })
+        }
+        ["margin", top, right, bottom, left] => {
+            let top: i32 = top.parse().context("Invalid top margin")?;
+            let right: i32 = right.parse().context("Invalid right margin")?;
+            let bottom: i32 = bottom.parse().context("Invalid bottom margin")?;
+            let left: i32 = left.parse().context("Invalid left margin")?;
+            Ok(IpcCommand::MarginSet { top, right, bottom, left, reply })
+        }
+        ["resize", size] => {
+            // Check for relative resize: +50, -50, +10%, -10%
+            let s = *size;
+            if s.starts_with('+') || s.starts_with('-') {
+                let is_percent = s.ends_with('%');
+                let num_str = if is_percent {
+                    &s[..s.len() - 1]
+                } else {
+                    s
+                };
+                let delta: i32 = num_str.parse()
+                    .map_err(|_| anyhow::anyhow!("Invalid relative size: {} (expected +50, -50, +10%, -10%)", s))?;
+                Ok(IpcCommand::ResizeRelative { delta, is_percent, reply })
+            } else {
+                let parsed = WallpaperSize::parse(size)
+                    .ok_or_else(|| anyhow::anyhow!("Invalid size format: {} (expected WxH e.g. 800x600, or +50, -10%)", size))?;
+                let w = match parsed.width {
+                    crate::config::WallpaperDimension::Pixels(px) => px.to_string(),
+                    crate::config::WallpaperDimension::Percentage(pct) => format!("{}%", pct),
+                };
+                let h = match parsed.height {
+                    crate::config::WallpaperDimension::Pixels(px) => px.to_string(),
+                    crate::config::WallpaperDimension::Percentage(pct) => format!("{}%", pct),
+                };
+                Ok(IpcCommand::Resize { width: w, height: h, reply })
+            }
+        }
+        ["drag", "toggle"] => Ok(IpcCommand::DragToggle { reply }),
+        ["drag", "on"] => Ok(IpcCommand::DragOn { reply }),
+        ["drag", "off"] => Ok(IpcCommand::DragOff { reply }),
         _ => Err(anyhow::anyhow!("Unknown command: {}", line)),
     }
 }
 
 /// Process an IPC command by mutating render loop state
+#[allow(clippy::too_many_arguments)]
 pub fn process_ipc_command(
     cmd: IpcCommand,
     visualizer: &mut VisualizerState,
@@ -104,22 +182,27 @@ pub fn process_ipc_command(
     opacity: &mut f32,
     config: &mut Config,
     monitors: &[(String, bool)],
+    pending: &mut PendingChanges,
 ) {
     match cmd {
         IpcCommand::StyleNext { reply } => {
             visualizer.next_style();
+            pending.save_config = true;
             let _ = reply.send(format!("ok: {}", visualizer.current_style_name()));
         }
         IpcCommand::StylePrev { reply } => {
             visualizer.prev_style();
+            pending.save_config = true;
             let _ = reply.send(format!("ok: {}", visualizer.current_style_name()));
         }
         IpcCommand::ColorNext { reply } => {
             *color_scheme = color_scheme.next();
+            pending.save_config = true;
             let _ = reply.send(format!("ok: {}", color_scheme.name()));
         }
         IpcCommand::ColorPrev { reply } => {
             *color_scheme = color_scheme.prev();
+            pending.save_config = true;
             let _ = reply.send(format!("ok: {}", color_scheme.name()));
         }
         IpcCommand::Toggle { reply } => {
@@ -129,6 +212,7 @@ pub fn process_ipc_command(
         }
         IpcCommand::SetOpacity { value, reply } => {
             *opacity = value;
+            pending.save_config = true;
             let _ = reply.send(format!("ok: {}", value));
         }
         IpcCommand::Reload { reply } => {
@@ -148,18 +232,27 @@ pub fn process_ipc_command(
             }
         }
         IpcCommand::Status { reply } => {
+            let (mt, mr, mb, ml) = config.wallpaper.effective_margins();
+            let size_str = match (&config.wallpaper.width, &config.wallpaper.height) {
+                (Some(w), Some(h)) => format!("{}x{}", w, h),
+                _ => "auto".to_string(),
+            };
             let status = format!(
-                "ok: style={} color={} visible={} opacity={}",
+                "ok: style={} color={} visible={} opacity={} layer={} anchor={:?} margin={},{},{},{} size={} draggable={}",
                 visualizer.current_style_name(),
                 color_scheme.name(),
                 visible,
                 opacity,
-            );
+                config.wallpaper.layer.name(),
+                config.wallpaper.anchor,
+                mt, mr, mb, ml,
+                size_str,
+                config.wallpaper.draggable,
+            ).to_lowercase();
             let _ = reply.send(status);
         }
         IpcCommand::ListStyles { reply } => {
-            let names: Vec<&str> = VISUALIZER_STYLES.iter().map(|s| s.name()).collect();
-            let _ = reply.send(format!("ok: {}", names.join(",")));
+            let _ = reply.send(format!("ok: {}", STYLE_NAMES.join(",")));
         }
         IpcCommand::ListColors { reply } => {
             let names: Vec<&str> = ColorScheme::all().iter().map(|c| c.name()).collect();
@@ -180,14 +273,17 @@ pub fn process_ipc_command(
         }
         IpcCommand::TextPosition { value, reply } => {
             config.text.position = value;
+            pending.save_config = true;
             let _ = reply.send(format!("ok: {}", value));
         }
         IpcCommand::TextFont { value, reply } => {
             config.text.font_style = value;
+            pending.save_config = true;
             let _ = reply.send(format!("ok: {:?}", value).to_lowercase());
         }
         IpcCommand::TextAnimation { value, reply } => {
             config.text.animation_style = value;
+            pending.save_config = true;
             let _ = reply.send(format!("ok: {:?}", value).to_lowercase());
         }
         IpcCommand::TextToggle { reply } => {
@@ -201,6 +297,87 @@ pub fn process_ipc_command(
                 config.text.show_artist = false;
                 let _ = reply.send("ok: hidden".to_string());
             }
+            pending.save_config = true;
+        }
+        IpcCommand::LayerNext { reply } => {
+            config.wallpaper.layer = config.wallpaper.layer.next();
+            pending.layer_change = true;
+            pending.save_config = true;
+            let _ = reply.send(format!("ok: {}", config.wallpaper.layer.name()));
+        }
+        IpcCommand::LayerPrev { reply } => {
+            config.wallpaper.layer = config.wallpaper.layer.prev();
+            pending.layer_change = true;
+            pending.save_config = true;
+            let _ = reply.send(format!("ok: {}", config.wallpaper.layer.name()));
+        }
+        IpcCommand::LayerSet { name, reply } => {
+            if let Some(layer) = WallpaperLayer::from_name(&name) {
+                config.wallpaper.layer = layer;
+                pending.layer_change = true;
+                pending.save_config = true;
+                let _ = reply.send(format!("ok: {}", layer.name()));
+            } else {
+                let _ = reply.send(format!("err: unknown layer '{}' ({})", name, WallpaperLayer::all_names().join(", ")));
+            }
+        }
+        IpcCommand::ListLayers { reply } => {
+            let current = config.wallpaper.layer.name();
+            let list: Vec<String> = WallpaperLayer::all_names().iter().map(|&n| {
+                if n == current { format!("{}*", n) } else { n.to_string() }
+            }).collect();
+            let _ = reply.send(format!("ok: {}", list.join(",")));
+        }
+        IpcCommand::AnchorSet { anchor, reply } => {
+            config.wallpaper.anchor = anchor;
+            pending.surface_update = true;
+            pending.save_config = true;
+            let _ = reply.send(format!("ok: {:?}", anchor).to_lowercase());
+        }
+        IpcCommand::MarginSet { top, right, bottom, left, reply } => {
+            config.wallpaper.margin_top = top;
+            config.wallpaper.margin_right = right;
+            config.wallpaper.margin_bottom = bottom;
+            config.wallpaper.margin_left = left;
+            config.wallpaper.margin = 0; // Clear uniform margin
+            pending.surface_update = true;
+            pending.save_config = true;
+            let _ = reply.send(format!("ok: {},{},{},{}", top, right, bottom, left));
+        }
+        IpcCommand::Resize { .. } => {
+            // Handled in wayland.rs main loop (needs surface dimensions for margin adjustment)
+            unreachable!("Resize should be intercepted in wayland.rs");
+        }
+        IpcCommand::DragToggle { reply } => {
+            config.wallpaper.draggable = !config.wallpaper.draggable;
+            pending.drag_changed = true;
+            pending.save_config = true;
+            let state = if config.wallpaper.draggable { "on" } else { "off" };
+            let mut msg = format!("ok: drag {}", state);
+            if config.wallpaper.draggable && config.wallpaper.layer == WallpaperLayer::Background {
+                msg.push_str(" (warning: background layer may not receive pointer events)");
+            }
+            let _ = reply.send(msg);
+        }
+        IpcCommand::DragOn { reply } => {
+            config.wallpaper.draggable = true;
+            pending.drag_changed = true;
+            pending.save_config = true;
+            let mut msg = "ok: drag on".to_string();
+            if config.wallpaper.layer == WallpaperLayer::Background {
+                msg.push_str(" (warning: background layer may not receive pointer events)");
+            }
+            let _ = reply.send(msg);
+        }
+        IpcCommand::DragOff { reply } => {
+            config.wallpaper.draggable = false;
+            pending.drag_changed = true;
+            pending.save_config = true;
+            let _ = reply.send("ok: drag off".to_string());
+        }
+        // ResizeRelative is intercepted in wayland.rs before reaching here
+        IpcCommand::ResizeRelative { reply, .. } => {
+            let _ = reply.send("err: not supported in this mode".to_string());
         }
         // Audio commands are intercepted in render loops before reaching here
         IpcCommand::ListSources { reply } => {

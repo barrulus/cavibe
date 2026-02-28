@@ -76,13 +76,9 @@ impl FrequencyAnalyzer {
         // Calculate overall metrics
         let intensity = smoothed.iter().sum::<f32>() / smoothed.len() as f32;
 
-        let third = smoothed.len() / 3;
-        let bass = smoothed[..third].iter().sum::<f32>() / third as f32;
-
         AudioData {
             frequencies: smoothed,
             intensity,
-            bass,
             waveform,
         }
     }
