@@ -131,38 +131,6 @@ See [full IPC reference](docs/configuration.md#ipc-control-wallpaper-mode) for a
 - A terminal with true color support (kitty, alacritty, wezterm, etc.)
 - Music player with MPRIS support for track info
 
-## Roadmap
-
-- [x] Wallpaper mode (Wayland layer-shell)
-- [x] Figlet/ASCII art text styles
-- [x] Proportional bar width/spacing
-- [x] Text animations in wallpaper mode (scroll, pulse, fade, wave)
-- [x] Custom title/artist colors with background
-- [x] Runtime control via CLI (`cavibe ctl`) for keybind integration
-- [x] Multi-monitor support for wallpaper mode
-- [x] Drag-to-move and interactive resize
-- [x] State persistence across restarts
-- [ ] Album art display
-- [ ] Custom color schemes from config
-- [ ] More visualizer styles
-- [ ] Audio device selection menu
-
-## Troubleshooting
-
-### Wallpaper mode shows error about layer-shell
-
-Your compositor doesn't support the `wlr-layer-shell` protocol. This is required for native wallpaper mode. Use the transparent terminal alternative described in [wallpaper docs](docs/wallpaper.md#transparent-terminal-alternative).
-
-### No audio visualization
-
-1. Ensure PipeWire or PulseAudio is running
-2. Check that audio is playing through your default sink
-3. Try increasing sensitivity: `cavibe --sensitivity 2.0`
-
-### No track info displayed
-
-Cavibe uses MPRIS to get track metadata. Ensure your music player supports MPRIS (most do: Spotify, Firefox, VLC, MPD with mpDris2, etc.).
-
 ## License
 
 MIT
