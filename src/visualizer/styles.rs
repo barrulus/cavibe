@@ -384,119 +384,37 @@ impl Visualizer for OscilloscopeStyle {
             return;
         }
 
-        // Braille grid: each character cell is 2 dots wide x 4 dots tall
-        let grid_w = area.width as usize * 2;
-        let grid_h = area.height as usize * 4;
-
-        // Allocate dot grid
-        let mut grid = vec![false; grid_w * grid_h];
-
+        let mut canvas = super::braille::BrailleCanvas::new(area.width as usize, area.height as usize);
         let num_samples = audio.waveform.len();
-        let center_y = grid_h as f32 / 2.0;
+        let center_y = canvas.grid_h as f32 / 2.0;
 
         // Map waveform samples to grid positions and connect with lines
         let mut prev_gx: Option<usize> = None;
         let mut prev_gy: Option<usize> = None;
 
-        for gx in 0..grid_w {
-            // Map grid x to sample index
-            let sample_idx = (gx * num_samples) / grid_w;
+        for gx in 0..canvas.grid_w {
+            let sample_idx = (gx * num_samples) / canvas.grid_w;
             let sample = audio.waveform[sample_idx.min(num_samples - 1)];
-
-            // Map sample (-1..1) to grid y
-            let gy = ((center_y - sample * center_y) as usize).min(grid_h - 1);
+            let gy = ((center_y - sample * center_y) as usize).min(canvas.grid_h - 1);
 
             if let (Some(px), Some(py)) = (prev_gx, prev_gy) {
-                // Bresenham line from (px, py) to (gx, gy)
-                bresenham_line(&mut grid, grid_w, grid_h, px, py, gx, gy);
+                canvas.line(px, py, gx, gy);
             } else {
-                // First point
-                grid[gy * grid_w + gx] = true;
+                canvas.set(gx, gy);
             }
 
             prev_gx = Some(gx);
             prev_gy = Some(gy);
         }
 
-        // Convert dot grid to braille characters
-        // Braille dot positions within a 2x4 cell:
-        // (0,0)=0x01 (1,0)=0x08
-        // (0,1)=0x02 (1,1)=0x10
-        // (0,2)=0x04 (1,2)=0x20
-        // (0,3)=0x40 (1,3)=0x80
-        let dot_map: [[u8; 4]; 2] = [
-            [0x01, 0x02, 0x04, 0x40],
-            [0x08, 0x10, 0x20, 0x80],
-        ];
-
-        for cy in 0..area.height as usize {
-            for cx in 0..area.width as usize {
-                let mut braille: u8 = 0;
-                let mut has_dots = false;
-
-                for (dx, col) in dot_map.iter().enumerate() {
-                    for (dy, &bit) in col.iter().enumerate() {
-                        let gx = cx * 2 + dx;
-                        let gy = cy * 4 + dy;
-                        if gx < grid_w && gy < grid_h && grid[gy * grid_w + gx] {
-                            braille |= bit;
-                            has_dots = true;
-                        }
-                    }
-                }
-
-                if has_dots {
-                    let position = cx as f32 / area.width as f32;
-                    // Use the average waveform intensity for color
-                    let sample_idx = (cx * 2 * num_samples) / grid_w;
-                    let intensity = audio.waveform[sample_idx.min(num_samples - 1)].abs();
-                    let (r, g, b) = color_scheme.get_color(position, intensity.min(1.0));
-
-                    let ch = char::from_u32(0x2800 + braille as u32).unwrap_or(' ');
-                    let cell = frame.buffer_mut().cell_mut(
-                        (area.x + cx as u16, area.y + cy as u16),
-                    );
-                    if let Some(cell) = cell {
-                        cell.set_char(ch);
-                        cell.set_fg(Color::Rgb(r, g, b));
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Draw a line on the dot grid using Bresenham's algorithm
-fn bresenham_line(grid: &mut [bool], grid_w: usize, grid_h: usize, x0: usize, y0: usize, x1: usize, y1: usize) {
-    let mut x0 = x0 as isize;
-    let mut y0 = y0 as isize;
-    let x1 = x1 as isize;
-    let y1 = y1 as isize;
-
-    let dx = (x1 - x0).abs();
-    let dy = -(y1 - y0).abs();
-    let sx: isize = if x0 < x1 { 1 } else { -1 };
-    let sy: isize = if y0 < y1 { 1 } else { -1 };
-    let mut err = dx + dy;
-
-    loop {
-        if x0 >= 0 && x0 < grid_w as isize && y0 >= 0 && y0 < grid_h as isize {
-            grid[y0 as usize * grid_w + x0 as usize] = true;
-        }
-
-        if x0 == x1 && y0 == y1 {
-            break;
-        }
-
-        let e2 = 2 * err;
-        if e2 >= dy {
-            err += dy;
-            x0 += sx;
-        }
-        if e2 <= dx {
-            err += dx;
-            y0 += sy;
-        }
+        let waveform = &audio.waveform;
+        let grid_w = canvas.grid_w;
+        canvas.render(frame, area, |cx, _cy| {
+            let position = cx as f32 / area.width as f32;
+            let sample_idx = (cx * 2 * num_samples) / grid_w;
+            let intensity = waveform[sample_idx.min(num_samples - 1)].abs();
+            Some(color_scheme.get_color(position, intensity.min(1.0)))
+        });
     }
 }
 
@@ -567,6 +485,104 @@ impl Visualizer for SpectrogramStyle {
 
 static SPECTROGRAM_STYLE: SpectrogramStyle = SpectrogramStyle::new();
 
+/// Radial bars style — frequency bars radiate outward from a circle
+pub struct RadialBarsStyle;
+
+impl Visualizer for RadialBarsStyle {
+    fn name(&self) -> &'static str {
+        "Radial"
+    }
+
+    fn render(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        audio: &AudioData,
+        color_scheme: &ColorScheme,
+        _config: &VisualizerConfig,
+    ) {
+        if area.width == 0 || area.height == 0 || audio.frequencies.is_empty() {
+            return;
+        }
+
+        let char_w = area.width as usize;
+        let char_h = area.height as usize;
+        let mut canvas = super::braille::BrailleCanvas::new(char_w, char_h);
+
+        // Fit a circle in braille grid space. Terminal aspect ratio ~0.5 (chars are ~2x tall
+        // as they are wide), but in braille grid coords each char is 2 wide × 4 tall,
+        // so effective pixel aspect is (2/4) * (char_w/char_h) → the braille grid already
+        // halves the distortion. We use aspect=0.5 so fit_circle compensates correctly.
+        let (cx, cy, max_radius) =
+            super::radial::fit_circle(canvas.grid_w, canvas.grid_h, 0.5);
+
+        let base_radius = max_radius * 0.4;
+        let bar_count = audio.frequencies.len();
+
+        // Draw base circle outline
+        let circle_steps = (base_radius * std::f32::consts::TAU).ceil() as usize;
+        if circle_steps > 0 {
+            let mut prev: Option<(usize, usize)> = None;
+            for step in 0..=circle_steps {
+                let angle = (step as f32 / circle_steps as f32) * std::f32::consts::TAU;
+                let (gx, gy) = super::radial::polar_to_grid(cx, cy, angle, base_radius);
+                let gx = gx.round() as usize;
+                let gy = gy.round() as usize;
+                if let Some((px, py)) = prev {
+                    canvas.line(px, py, gx, gy);
+                } else {
+                    canvas.set(gx, gy);
+                }
+                prev = Some((gx, gy));
+            }
+        }
+
+        // Draw radial bars for each frequency bin
+        // Angle 0 = top (12 o'clock), proceeding clockwise
+        for i in 0..bar_count {
+            let magnitude = audio.frequencies[i];
+            if magnitude < 0.01 {
+                continue;
+            }
+            // Map to angle: start at -PI/2 (top), go clockwise (positive angle)
+            let angle =
+                -std::f32::consts::FRAC_PI_2 + (i as f32 / bar_count as f32) * std::f32::consts::TAU;
+            let bar_length = magnitude * (max_radius - base_radius);
+
+            let (x0, y0) = super::radial::polar_to_grid(cx, cy, angle, base_radius);
+            let (x1, y1) = super::radial::polar_to_grid(cx, cy, angle, base_radius + bar_length);
+
+            canvas.line(
+                x0.round() as usize,
+                y0.round() as usize,
+                x1.round() as usize,
+                y1.round() as usize,
+            );
+        }
+
+        // Render with color based on angle position and magnitude
+        let grid_w = canvas.grid_w;
+        let grid_h = canvas.grid_h;
+        let cx_f = cx;
+        let cy_f = cy;
+        canvas.render(frame, area, |char_cx, char_cy| {
+            // Map character cell center back to angle to determine color
+            let gx = (char_cx * 2) as f32 + 1.0;
+            let gy = (char_cy * 4) as f32 + 2.0;
+            if gx >= grid_w as f32 || gy >= grid_h as f32 {
+                return None;
+            }
+            let dx = gx - cx_f;
+            let dy = gy - cy_f;
+            let angle = dy.atan2(dx) + std::f32::consts::FRAC_PI_2;
+            let position = (angle / std::f32::consts::TAU).rem_euclid(1.0);
+            let dist = (dx * dx + dy * dy).sqrt();
+            let intensity = ((dist - base_radius) / (max_radius - base_radius)).clamp(0.0, 1.0);
+            Some(color_scheme.get_color(position, intensity))
+        });
+    }
+}
+
 /// All available visualizer styles
 pub static VISUALIZER_STYLES: &[&(dyn Visualizer + Sync)] = &[
     &ClassicBars,
@@ -576,4 +592,5 @@ pub static VISUALIZER_STYLES: &[&(dyn Visualizer + Sync)] = &[
     &BlocksStyle,
     &OscilloscopeStyle,
     &SPECTROGRAM_STYLE,
+    &RadialBarsStyle,
 ];

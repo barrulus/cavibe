@@ -11,6 +11,7 @@
 | **Blocks** | Unicode block characters for smooth gradients |
 | **Oscilloscope** | Raw audio waveform display (time-domain) |
 | **Spectrogram** | Scrolling 2D heatmap (frequency vs time) |
+| **Radial** | Frequency bars radiating outward from a circle |
 
 Cycle styles with `s` in terminal mode or `cavibe ctl style next` in wallpaper mode.
 

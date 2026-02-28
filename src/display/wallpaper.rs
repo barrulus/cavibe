@@ -429,6 +429,7 @@ fn render_bars_direct(
         4 => render_direct_blocks(stdout, ctx, bar_count),
         5 => render_direct_oscilloscope(stdout, ctx),
         6 => render_direct_spectrogram(stdout, ctx),
+        7 => render_direct_radial(stdout, ctx),
         _ => render_direct_classic(stdout, ctx, bar_count),
     }
 }
@@ -693,6 +694,70 @@ fn render_direct_spectrogram(
                 SetForegroundColor(Color::Rgb { r, g, b }),
                 Print("█")
             )?;
+        }
+    }
+    Ok(())
+}
+
+/// Style 7: Radial — frequency bars radiating outward from a circle
+fn render_direct_radial(
+    stdout: &mut impl Write,
+    ctx: &DirectRenderCtx,
+) -> Result<()> {
+    if ctx.width == 0 || ctx.height == 0 || ctx.audio.frequencies.is_empty() {
+        return Ok(());
+    }
+
+    let bar_count = ctx.audio.frequencies.len();
+    // Account for terminal character aspect ratio (~2:1 height:width)
+    let char_aspect = 2.0_f32;
+    let cx = ctx.width as f32 / 2.0;
+    let cy = ctx.height as f32 / 2.0;
+    // Effective dimensions accounting for aspect ratio
+    let effective_w = ctx.width as f32;
+    let effective_h = ctx.height as f32 * char_aspect;
+    let half_dim = effective_w.min(effective_h) / 2.0;
+    let base_radius = half_dim * 0.35;
+    let max_radius = half_dim * 0.95;
+
+    // Draw base circle
+    let circle_steps = (base_radius * std::f32::consts::TAU).ceil() as usize;
+    for step in 0..circle_steps {
+        let angle = (step as f32 / circle_steps as f32) * std::f32::consts::TAU;
+        let px = (cx + angle.cos() * base_radius).round() as u16;
+        let py = (cy + angle.sin() * base_radius / char_aspect).round() as u16;
+        let col = ctx.x + px;
+        let row = ctx.y + py;
+        if px < ctx.width && py < ctx.height {
+            let position = ((angle + std::f32::consts::FRAC_PI_2) / std::f32::consts::TAU).rem_euclid(1.0);
+            let (r, g, b) = ctx.color_scheme.get_color(position, 0.3);
+            execute!(stdout, MoveTo(col, row), SetForegroundColor(Color::Rgb { r, g, b }), Print("·"))?;
+        }
+    }
+
+    // Draw radial bars
+    for i in 0..bar_count {
+        let magnitude = ctx.audio.frequencies[i];
+        if magnitude < 0.01 {
+            continue;
+        }
+        let angle = -std::f32::consts::FRAC_PI_2
+            + (i as f32 / bar_count as f32) * std::f32::consts::TAU;
+        let bar_length = magnitude * (max_radius - base_radius);
+        let position = i as f32 / bar_count as f32;
+        let cos_a = angle.cos();
+        let sin_a = angle.sin();
+
+        let steps = (bar_length.ceil() as usize).max(1);
+        for s in 0..=steps {
+            let r_dist = base_radius + (s as f32 / steps as f32) * bar_length;
+            let px = (cx + cos_a * r_dist).round() as u16;
+            let py = (cy + sin_a * r_dist / char_aspect).round() as u16;
+            if px < ctx.width && py < ctx.height {
+                let intensity = (r_dist - base_radius) / (max_radius - base_radius);
+                let (r, g, b) = ctx.color_scheme.get_color(position, magnitude * 0.5 + intensity * 0.5);
+                execute!(stdout, MoveTo(ctx.x + px, ctx.y + py), SetForegroundColor(Color::Rgb { r, g, b }), Print("█"))?;
+            }
         }
     }
     Ok(())

@@ -611,6 +611,7 @@ fn render_bars(
         4 => render_bars_blocks(canvas, &layout, opts),
         5 => render_bars_oscilloscope(canvas, &layout, opts),
         6 => render_bars_spectrogram(canvas, &layout, opts),
+        7 => render_bars_radial(canvas, &layout, opts),
         _ => render_bars_classic(canvas, &layout, opts),
     }
 }
@@ -880,6 +881,72 @@ fn render_bars_spectrogram(canvas: &mut Canvas, layout: &BarLayout, opts: &Rende
             let position = x as f32 / canvas.width as f32;
             let (r, g, b) = opts.color_scheme.get_color(position, magnitude);
             canvas.put_pixel(x, y, r, g, b, opts.opacity * magnitude.max(0.05));
+        }
+    }
+}
+
+/// Style 7: Radial — frequency bars radiating outward from a circle
+fn render_bars_radial(canvas: &mut Canvas, layout: &BarLayout, opts: &RenderOptions) {
+    let cx = canvas.width as f32 / 2.0;
+    let cy = (layout.bars_y_start as f32) + layout.bars_height as f32 / 2.0;
+    let half_dim = (canvas.width.min(layout.bars_height) as f32) / 2.0;
+    let base_radius = half_dim * 0.35;
+    let max_radius = half_dim * 0.95;
+    let thickness = (opts.bar_width / 3).max(2);
+
+    let bar_count = layout.render_frequencies.len();
+    if bar_count == 0 {
+        return;
+    }
+
+    // Draw base circle
+    let circle_steps = (base_radius * std::f32::consts::TAU).ceil() as usize;
+    for step in 0..circle_steps {
+        let angle = (step as f32 / circle_steps as f32) * std::f32::consts::TAU;
+        let px = (cx + angle.cos() * base_radius).round() as usize;
+        let py = (cy + angle.sin() * base_radius).round() as usize;
+        let position = (angle + std::f32::consts::FRAC_PI_2) / std::f32::consts::TAU;
+        let position = position.rem_euclid(1.0);
+        let (r, g, b) = opts.color_scheme.get_color(position, 0.3);
+        for t in 0..thickness {
+            let tx = px + t;
+            if tx < canvas.width && py >= layout.bars_y_start && py < layout.bars_y_start + layout.bars_height && py < canvas.height {
+                canvas.put_pixel(tx, py, r, g, b, opts.opacity * 0.5);
+            }
+        }
+    }
+
+    // Draw radial bars
+    for i in 0..bar_count {
+        let magnitude = layout.render_frequencies[i];
+        if magnitude < 0.01 {
+            continue;
+        }
+        // Angle: start at top (-PI/2), go clockwise
+        let angle = -std::f32::consts::FRAC_PI_2
+            + (i as f32 / bar_count as f32) * std::f32::consts::TAU;
+        let bar_length = magnitude * (max_radius - base_radius);
+        let position = i as f32 / bar_count as f32;
+
+        // Draw line from base_radius to base_radius + bar_length
+        let steps = (bar_length.ceil() as usize).max(1);
+        let cos_a = angle.cos();
+        let sin_a = angle.sin();
+        for s in 0..=steps {
+            let r_dist = base_radius + (s as f32 / steps as f32) * bar_length;
+            let px = (cx + cos_a * r_dist).round() as isize;
+            let py_val = (cy + sin_a * r_dist).round() as isize;
+            let intensity = (r_dist - base_radius) / (max_radius - base_radius);
+            let (r, g, b) = opts.color_scheme.get_color(position, magnitude * 0.5 + intensity * 0.5);
+
+            // Draw with thickness perpendicular to the radial direction
+            for t in -(thickness as isize / 2)..=(thickness as isize / 2) {
+                let tx = (px as f32 - sin_a * t as f32).round() as usize;
+                let ty = (py_val as f32 + cos_a * t as f32).round() as usize;
+                if tx < canvas.width && ty >= layout.bars_y_start && ty < layout.bars_y_start + layout.bars_height && ty < canvas.height {
+                    canvas.put_pixel(tx, ty, r, g, b, opts.opacity);
+                }
+            }
         }
     }
 }

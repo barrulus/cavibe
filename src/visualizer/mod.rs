@@ -1,4 +1,6 @@
 mod ascii_font;
+pub mod braille;
+pub mod radial;
 mod styles;
 mod text;
 
