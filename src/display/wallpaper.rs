@@ -191,6 +191,9 @@ async fn run_direct_mode(config: Config, mut ipc_rx: mpsc::Receiver<IpcCommand>)
     let mut style_timer = Instant::now();
     let rotation_interval = Duration::from_secs(config.display.rotation_interval_secs);
 
+    // Spectrogram history buffer (persists across frames)
+    let mut spectrogram_history: Vec<Vec<f32>> = Vec::new();
+
     loop {
         // Check for shutdown
         if *shutdown_rx.borrow() {
@@ -289,6 +292,13 @@ async fn run_direct_mode(config: Config, mut ipc_rx: mpsc::Receiver<IpcCommand>)
             style_timer = Instant::now();
         }
 
+        // Update spectrogram history
+        spectrogram_history.push(audio.frequencies.clone());
+        if spectrogram_history.len() > height as usize {
+            let excess = spectrogram_history.len() - height as usize;
+            spectrogram_history.drain(..excess);
+        }
+
         // Render frame directly to stdout
         render_frame(
             &mut stdout,
@@ -300,6 +310,7 @@ async fn run_direct_mode(config: Config, mut ipc_rx: mpsc::Receiver<IpcCommand>)
             &audio,
             &track,
             &color_scheme,
+            &spectrogram_history,
         )?;
 
         // Rate limiting
@@ -316,7 +327,20 @@ async fn run_direct_mode(config: Config, mut ipc_rx: mpsc::Receiver<IpcCommand>)
     Ok(())
 }
 
+/// Bundled rendering context for direct mode, avoiding excessive function arguments
+struct DirectRenderCtx<'a> {
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16,
+    audio: &'a Arc<AudioData>,
+    color_scheme: &'a ColorScheme,
+    config: &'a VisualizerConfig,
+    spectrogram_history: &'a [Vec<f32>],
+}
+
 /// Render a single frame directly to stdout using ANSI escape codes
+#[allow(clippy::too_many_arguments)]
 fn render_frame(
     stdout: &mut impl Write,
     offset_x: u16,
@@ -327,6 +351,7 @@ fn render_frame(
     audio: &Arc<AudioData>,
     track: &Arc<TrackInfo>,
     color_scheme: &ColorScheme,
+    spectrogram_history: &[Vec<f32>],
 ) -> Result<()> {
     let text_height = 3u16;
     let position = visualizer.text_animator.position();
@@ -352,8 +377,19 @@ fn render_frame(
         }
     };
 
+    let ctx = DirectRenderCtx {
+        x: bars_x,
+        y: bars_y,
+        width: bars_w,
+        height: bars_h,
+        audio,
+        color_scheme,
+        config: &visualizer.visualizer_config,
+        spectrogram_history,
+    };
+
     // Render bars with current style
-    render_bars_direct(stdout, bars_x, bars_y, bars_w, bars_h, audio, color_scheme, &visualizer.visualizer_config, visualizer.current_style)?;
+    render_bars_direct(stdout, &ctx, visualizer.current_style)?;
 
     // Render text area
     render_text_direct(stdout, text_x, text_y, text_w, text_height, track, audio, color_scheme, visualizer.time)?;
@@ -365,27 +401,21 @@ fn render_frame(
 /// Render bars directly using ANSI codes
 fn render_bars_direct(
     stdout: &mut impl Write,
-    x: u16,
-    y: u16,
-    width: u16,
-    height: u16,
-    audio: &Arc<AudioData>,
-    color_scheme: &ColorScheme,
-    config: &VisualizerConfig,
+    ctx: &DirectRenderCtx,
     style: usize,
 ) -> Result<()> {
-    if width == 0 || height == 0 || audio.frequencies.is_empty() {
+    if ctx.width == 0 || ctx.height == 0 || ctx.audio.frequencies.is_empty() {
         return Ok(());
     }
 
-    let bar_count = audio.frequencies.len().min(width as usize);
+    let bar_count = ctx.audio.frequencies.len().min(ctx.width as usize);
 
     // Clear the entire bar area first
-    for row in 0..height {
-        for col in 0..width {
+    for row in 0..ctx.height {
+        for col in 0..ctx.width {
             execute!(
                 stdout,
-                MoveTo(x + col, y + row),
+                MoveTo(ctx.x + col, ctx.y + row),
                 SetBackgroundColor(Color::Reset),
                 Print(" ")
             )?;
@@ -393,40 +423,35 @@ fn render_bars_direct(
     }
 
     match style {
-        1 => render_direct_mirrored(stdout, x, y, width, height, audio, color_scheme, config, bar_count),
-        2 => render_direct_wave(stdout, x, y, width, height, audio, color_scheme, config, bar_count),
-        3 => render_direct_dots(stdout, x, y, width, height, audio, color_scheme, config, bar_count),
-        4 => render_direct_blocks(stdout, x, y, width, height, audio, color_scheme, config, bar_count),
-        5 => render_direct_oscilloscope(stdout, x, y, width, height, audio, color_scheme),
-        _ => render_direct_classic(stdout, x, y, width, height, audio, color_scheme, config, bar_count),
+        1 => render_direct_mirrored(stdout, ctx, bar_count),
+        2 => render_direct_wave(stdout, ctx, bar_count),
+        3 => render_direct_dots(stdout, ctx, bar_count),
+        4 => render_direct_blocks(stdout, ctx, bar_count),
+        5 => render_direct_oscilloscope(stdout, ctx),
+        6 => render_direct_spectrogram(stdout, ctx),
+        _ => render_direct_classic(stdout, ctx, bar_count),
     }
 }
 
 /// Style 0: Classic vertical bars from bottom
 fn render_direct_classic(
     stdout: &mut impl Write,
-    x: u16,
-    y: u16,
-    width: u16,
-    height: u16,
-    audio: &Arc<AudioData>,
-    color_scheme: &ColorScheme,
-    config: &VisualizerConfig,
+    ctx: &DirectRenderCtx,
     bar_count: usize,
 ) -> Result<()> {
-    for (i, &magnitude) in audio.frequencies.iter().take(bar_count).enumerate() {
-        let bar_height = (magnitude * height as f32) as u16;
-        let x_start = bar_x_position(i, bar_count, width);
-        let x_end = bar_x_position(i + 1, bar_count, width);
+    for (i, &magnitude) in ctx.audio.frequencies.iter().take(bar_count).enumerate() {
+        let bar_height = (magnitude * ctx.height as f32) as u16;
+        let x_start = bar_x_position(i, bar_count, ctx.width);
+        let x_end = bar_x_position(i + 1, bar_count, ctx.width);
         let slot_width = (x_end - x_start).max(1);
-        let bar_x = x + x_start;
+        let bar_x = ctx.x + x_start;
         let position = i as f32 / bar_count as f32;
-        let draw_width = calculate_bar_dimensions(slot_width, config);
+        let draw_width = calculate_bar_dimensions(slot_width, ctx.config);
 
-        for offset in 0..bar_height.min(height) {
-            let row = y + height - 1 - offset;
-            let intensity = offset as f32 / height as f32;
-            let (r, g, b) = color_scheme.get_color(position, intensity);
+        for offset in 0..bar_height.min(ctx.height) {
+            let row = ctx.y + ctx.height - 1 - offset;
+            let intensity = offset as f32 / ctx.height as f32;
+            let (r, g, b) = ctx.color_scheme.get_color(position, intensity);
 
             for bx in 0..draw_width {
                 execute!(stdout, MoveTo(bar_x + bx, row), SetForegroundColor(Color::Rgb { r, g, b }), Print("█"))?;
@@ -439,33 +464,27 @@ fn render_direct_classic(
 /// Style 1: Mirrored bars growing from center
 fn render_direct_mirrored(
     stdout: &mut impl Write,
-    x: u16,
-    y: u16,
-    width: u16,
-    height: u16,
-    audio: &Arc<AudioData>,
-    color_scheme: &ColorScheme,
-    config: &VisualizerConfig,
+    ctx: &DirectRenderCtx,
     bar_count: usize,
 ) -> Result<()> {
-    let center = y + height / 2;
+    let center = ctx.y + ctx.height / 2;
 
-    for (i, &magnitude) in audio.frequencies.iter().take(bar_count).enumerate() {
-        let half_height = (magnitude * height as f32 / 2.0) as u16;
-        let x_start = bar_x_position(i, bar_count, width);
-        let x_end = bar_x_position(i + 1, bar_count, width);
+    for (i, &magnitude) in ctx.audio.frequencies.iter().take(bar_count).enumerate() {
+        let half_height = (magnitude * ctx.height as f32 / 2.0) as u16;
+        let x_start = bar_x_position(i, bar_count, ctx.width);
+        let x_end = bar_x_position(i + 1, bar_count, ctx.width);
         let slot_width = (x_end - x_start).max(1);
-        let bar_x = x + x_start;
+        let bar_x = ctx.x + x_start;
         let position = i as f32 / bar_count as f32;
-        let draw_width = calculate_bar_dimensions(slot_width, config);
+        let draw_width = calculate_bar_dimensions(slot_width, ctx.config);
 
-        for offset in 0..half_height.min(height / 2) {
-            let intensity = offset as f32 / (height as f32 / 2.0);
-            let (r, g, b) = color_scheme.get_color(position, intensity);
+        for offset in 0..half_height.min(ctx.height / 2) {
+            let intensity = offset as f32 / (ctx.height as f32 / 2.0);
+            let (r, g, b) = ctx.color_scheme.get_color(position, intensity);
 
             // Upper half
             let row_up = center.saturating_sub(offset);
-            if row_up >= y {
+            if row_up >= ctx.y {
                 for bx in 0..draw_width {
                     execute!(stdout, MoveTo(bar_x + bx, row_up), SetForegroundColor(Color::Rgb { r, g, b }), Print("█"))?;
                 }
@@ -473,7 +492,7 @@ fn render_direct_mirrored(
 
             // Lower half
             let row_down = center + offset;
-            if row_down < y + height {
+            if row_down < ctx.y + ctx.height {
                 for bx in 0..draw_width {
                     execute!(stdout, MoveTo(bar_x + bx, row_down), SetForegroundColor(Color::Rgb { r, g, b }), Print("█"))?;
                 }
@@ -486,30 +505,24 @@ fn render_direct_mirrored(
 /// Style 2: Wave lines centered on middle row
 fn render_direct_wave(
     stdout: &mut impl Write,
-    x: u16,
-    y: u16,
-    width: u16,
-    height: u16,
-    audio: &Arc<AudioData>,
-    color_scheme: &ColorScheme,
-    _config: &VisualizerConfig,
+    ctx: &DirectRenderCtx,
     bar_count: usize,
 ) -> Result<()> {
-    let center = y + height / 2;
+    let center = ctx.y + ctx.height / 2;
 
-    for (i, &magnitude) in audio.frequencies.iter().take(bar_count).enumerate() {
-        let wave_height = (magnitude * (height as f32 / 2.0)) as i16;
-        let col = x + bar_x_position(i, bar_count, width);
-        if col >= x + width {
+    for (i, &magnitude) in ctx.audio.frequencies.iter().take(bar_count).enumerate() {
+        let wave_height = (magnitude * (ctx.height as f32 / 2.0)) as i16;
+        let col = ctx.x + bar_x_position(i, bar_count, ctx.width);
+        if col >= ctx.x + ctx.width {
             break;
         }
         let position = i as f32 / bar_count as f32;
 
         for offset in -wave_height..=wave_height {
             let row = (center as i16 + offset) as u16;
-            if row >= y && row < y + height {
+            if row >= ctx.y && row < ctx.y + ctx.height {
                 let intensity = 1.0 - (offset.unsigned_abs() as f32 / wave_height.max(1) as f32);
-                let (r, g, b) = color_scheme.get_color(position, intensity);
+                let (r, g, b) = ctx.color_scheme.get_color(position, intensity);
                 execute!(stdout, MoveTo(col, row), SetForegroundColor(Color::Rgb { r, g, b }), Print("│"))?;
             }
         }
@@ -520,36 +533,30 @@ fn render_direct_wave(
 /// Style 3: Dots at peak with trailing dots below
 fn render_direct_dots(
     stdout: &mut impl Write,
-    x: u16,
-    y: u16,
-    width: u16,
-    height: u16,
-    audio: &Arc<AudioData>,
-    color_scheme: &ColorScheme,
-    _config: &VisualizerConfig,
+    ctx: &DirectRenderCtx,
     bar_count: usize,
 ) -> Result<()> {
-    for (i, &magnitude) in audio.frequencies.iter().take(bar_count).enumerate() {
-        let col = x + bar_x_position(i, bar_count, width);
-        if col >= x + width {
+    for (i, &magnitude) in ctx.audio.frequencies.iter().take(bar_count).enumerate() {
+        let col = ctx.x + bar_x_position(i, bar_count, ctx.width);
+        if col >= ctx.x + ctx.width {
             break;
         }
         let position = i as f32 / bar_count as f32;
-        let dot_y = y + height - 1 - (magnitude * (height - 1) as f32) as u16;
+        let dot_y = ctx.y + ctx.height - 1 - (magnitude * (ctx.height - 1) as f32) as u16;
 
         // Draw dot
-        if dot_y >= y && dot_y < y + height {
-            let (r, g, b) = color_scheme.get_color(position, magnitude);
+        if dot_y >= ctx.y && dot_y < ctx.y + ctx.height {
+            let (r, g, b) = ctx.color_scheme.get_color(position, magnitude);
             execute!(stdout, MoveTo(col, dot_y), SetForegroundColor(Color::Rgb { r, g, b }), Print("●"))?;
         }
 
         // Draw trail
-        for trail_y in (dot_y + 1)..(y + height) {
-            let trail_intensity = 1.0 - ((trail_y - dot_y) as f32 / (height as f32 / 2.0));
+        for trail_y in (dot_y + 1)..(ctx.y + ctx.height) {
+            let trail_intensity = 1.0 - ((trail_y - dot_y) as f32 / (ctx.height as f32 / 2.0));
             if trail_intensity <= 0.0 {
                 break;
             }
-            let (r, g, b) = color_scheme.get_color(position, trail_intensity * magnitude);
+            let (r, g, b) = ctx.color_scheme.get_color(position, trail_intensity * magnitude);
             execute!(stdout, MoveTo(col, trail_y), SetForegroundColor(Color::Rgb { r, g, b }), Print("·"))?;
         }
     }
@@ -559,33 +566,27 @@ fn render_direct_dots(
 /// Style 4: Blocks with partial unicode block characters
 fn render_direct_blocks(
     stdout: &mut impl Write,
-    x: u16,
-    y: u16,
-    width: u16,
-    height: u16,
-    audio: &Arc<AudioData>,
-    color_scheme: &ColorScheme,
-    config: &VisualizerConfig,
+    ctx: &DirectRenderCtx,
     bar_count: usize,
 ) -> Result<()> {
     let block_chars = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
-    for (i, &magnitude) in audio.frequencies.iter().take(bar_count).enumerate() {
-        let x_start = bar_x_position(i, bar_count, width);
-        let x_end = bar_x_position(i + 1, bar_count, width);
+    for (i, &magnitude) in ctx.audio.frequencies.iter().take(bar_count).enumerate() {
+        let x_start = bar_x_position(i, bar_count, ctx.width);
+        let x_end = bar_x_position(i + 1, bar_count, ctx.width);
         let slot_width = (x_end - x_start).max(1);
-        let bar_x = x + x_start;
+        let bar_x = ctx.x + x_start;
         let position = i as f32 / bar_count as f32;
-        let draw_width = calculate_bar_dimensions(slot_width, config);
+        let draw_width = calculate_bar_dimensions(slot_width, ctx.config);
 
-        let full_blocks = (magnitude * height as f32) as u16;
-        let partial = ((magnitude * height as f32) % 1.0 * 8.0) as usize;
+        let full_blocks = (magnitude * ctx.height as f32) as u16;
+        let partial = ((magnitude * ctx.height as f32) % 1.0 * 8.0) as usize;
 
         // Draw full blocks
-        for b in 0..full_blocks.min(height) {
-            let row = y + height - 1 - b;
-            let intensity = b as f32 / height as f32;
-            let (r, g, b) = color_scheme.get_color(position, intensity);
+        for b in 0..full_blocks.min(ctx.height) {
+            let row = ctx.y + ctx.height - 1 - b;
+            let intensity = b as f32 / ctx.height as f32;
+            let (r, g, b) = ctx.color_scheme.get_color(position, intensity);
 
             for bx in 0..draw_width {
                 execute!(stdout, MoveTo(bar_x + bx, row), SetForegroundColor(Color::Rgb { r, g, b }), Print("█"))?;
@@ -593,10 +594,10 @@ fn render_direct_blocks(
         }
 
         // Draw partial block on top
-        if full_blocks < height && partial > 0 {
-            let row = y + height - 1 - full_blocks;
-            let intensity = full_blocks as f32 / height as f32;
-            let (r, g, b) = color_scheme.get_color(position, intensity);
+        if full_blocks < ctx.height && partial > 0 {
+            let row = ctx.y + ctx.height - 1 - full_blocks;
+            let intensity = full_blocks as f32 / ctx.height as f32;
+            let (r, g, b) = ctx.color_scheme.get_color(position, intensity);
             let ch = block_chars[partial.min(7)];
 
             for bx in 0..draw_width {
@@ -610,37 +611,32 @@ fn render_direct_blocks(
 /// Style 5: Oscilloscope — raw waveform as a continuous line
 fn render_direct_oscilloscope(
     stdout: &mut impl Write,
-    x: u16,
-    y: u16,
-    width: u16,
-    height: u16,
-    audio: &Arc<AudioData>,
-    color_scheme: &ColorScheme,
+    ctx: &DirectRenderCtx,
 ) -> Result<()> {
-    if audio.waveform.is_empty() || width == 0 || height == 0 {
+    if ctx.audio.waveform.is_empty() || ctx.width == 0 || ctx.height == 0 {
         return Ok(());
     }
 
-    let num_samples = audio.waveform.len();
-    let center_y = y + height / 2;
-    let half_height = height as f32 / 2.0;
+    let num_samples = ctx.audio.waveform.len();
+    let center_y = ctx.y + ctx.height / 2;
+    let half_height = ctx.height as f32 / 2.0;
 
     let mut prev_row: Option<u16> = None;
 
-    for col_offset in 0..width {
-        let col = x + col_offset;
+    for col_offset in 0..ctx.width {
+        let col = ctx.x + col_offset;
         // Map column to sample index
-        let sample_idx = (col_offset as usize * num_samples) / width as usize;
-        let sample = audio.waveform[sample_idx.min(num_samples - 1)];
+        let sample_idx = (col_offset as usize * num_samples) / ctx.width as usize;
+        let sample = ctx.audio.waveform[sample_idx.min(num_samples - 1)];
 
         // Map sample (-1..1) to row
         let row = ((center_y as f32 - sample * half_height) as u16)
-            .max(y)
-            .min(y + height - 1);
+            .max(ctx.y)
+            .min(ctx.y + ctx.height - 1);
 
-        let position = col_offset as f32 / width as f32;
+        let position = col_offset as f32 / ctx.width as f32;
         let intensity = sample.abs().min(1.0);
-        let (r, g, b) = color_scheme.get_color(position, intensity.max(0.3));
+        let (r, g, b) = ctx.color_scheme.get_color(position, intensity.max(0.3));
 
         // Fill vertically between prev_row and row for smoothness
         let (y_min, y_max) = if let Some(pr) = prev_row {
@@ -650,7 +646,7 @@ fn render_direct_oscilloscope(
         };
 
         for fill_row in y_min..=y_max {
-            if fill_row >= y && fill_row < y + height {
+            if fill_row >= ctx.y && fill_row < ctx.y + ctx.height {
                 let ch = if fill_row == row { '●' } else { '│' };
                 execute!(stdout, MoveTo(col, fill_row), SetForegroundColor(Color::Rgb { r, g, b }), Print(ch))?;
             }
@@ -661,7 +657,49 @@ fn render_direct_oscilloscope(
     Ok(())
 }
 
+/// Style 6: Spectrogram — scrolling 2D heatmap (X=frequency, Y=time)
+fn render_direct_spectrogram(
+    stdout: &mut impl Write,
+    ctx: &DirectRenderCtx,
+) -> Result<()> {
+    let history = ctx.spectrogram_history;
+    if history.is_empty() || ctx.width == 0 || ctx.height == 0 {
+        return Ok(());
+    }
+
+    let num_rows = history.len().min(ctx.height as usize);
+
+    for (row_idx, slice) in history.iter().rev().take(num_rows).enumerate() {
+        // row_idx 0 = newest (bottom), draw from bottom up
+        let row = ctx.y + ctx.height - 1 - row_idx as u16;
+        if row < ctx.y {
+            break;
+        }
+
+        let num_freqs = slice.len();
+        if num_freqs == 0 {
+            continue;
+        }
+
+        for col in 0..ctx.width {
+            let freq_idx = (col as usize * num_freqs) / ctx.width as usize;
+            let magnitude = slice[freq_idx.min(num_freqs - 1)];
+            let position = col as f32 / ctx.width as f32;
+            let (r, g, b) = ctx.color_scheme.get_color(position, magnitude);
+
+            execute!(
+                stdout,
+                MoveTo(ctx.x + col, row),
+                SetForegroundColor(Color::Rgb { r, g, b }),
+                Print("█")
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// Render text directly using ANSI codes
+#[allow(clippy::too_many_arguments)]
 fn render_text_direct(
     stdout: &mut impl Write,
     x: u16,

@@ -7,6 +7,14 @@ use std::sync::Arc;
 
 use super::ascii_font;
 
+/// Shared context for text rendering methods
+struct TextRenderCtx<'a> {
+    audio: &'a Arc<AudioData>,
+    color_scheme: &'a ColorScheme,
+    time: f32,
+    is_placeholder: bool,
+}
+
 pub struct TextAnimator {
     config: TextConfig,
     scroll_offset: f32,
@@ -70,13 +78,14 @@ impl TextAnimator {
 
         // Build display text based on config
         let text = self.build_display_text(track);
+        let ctx = TextRenderCtx { audio, color_scheme, time, is_placeholder: text.is_empty() };
         if text.is_empty() {
-            self.render_placeholder(frame, area, audio, color_scheme, time);
+            self.render_placeholder(frame, area, &ctx);
             return;
         }
 
         // Render the text with animation
-        self.render_animated_text(frame, area, &text, audio, color_scheme, time, false);
+        self.render_animated_text(frame, area, &text, &ctx);
     }
 
     fn apply_margins(&self, area: Rect) -> Rect {
@@ -119,19 +128,16 @@ impl TextAnimator {
         frame: &mut Frame,
         area: Rect,
         text: &str,
-        audio: &Arc<AudioData>,
-        color_scheme: &ColorScheme,
-        time: f32,
-        is_placeholder: bool,
+        ctx: &TextRenderCtx,
     ) {
         // Handle ASCII art font styles
         match self.config.font_style {
             FontStyle::Ascii => {
-                self.render_ascii_text(frame, area, text, audio, color_scheme, time, is_placeholder);
+                self.render_ascii_text(frame, area, text, ctx);
                 return;
             }
             FontStyle::Figlet => {
-                self.render_figlet_text(frame, area, text, audio, color_scheme, time, is_placeholder);
+                self.render_figlet_text(frame, area, text, ctx);
                 return;
             }
             _ => {}
@@ -142,8 +148,8 @@ impl TextAnimator {
         let text_len = text_chars.len();
 
         // Get base colors
-        let colors = if self.config.use_color_scheme || is_placeholder {
-            color_scheme.get_text_gradient(text_len, audio.intensity, time)
+        let colors = if self.config.use_color_scheme || ctx.is_placeholder {
+            ctx.color_scheme.get_text_gradient(text_len, ctx.audio.intensity, ctx.time)
         } else {
             self.get_custom_colors(text_len)
         };
@@ -169,7 +175,7 @@ impl TextAnimator {
             }
 
             let ch = text_chars[i];
-            let (r, g, b) = self.apply_animation_effect(colors[i], i, audio);
+            let (r, g, b) = self.apply_animation_effect(colors[i], i, ctx.audio);
 
             if let Some(cell) = frame.buffer_mut().cell_mut((x, y)) {
                 cell.set_char(ch);
@@ -181,7 +187,7 @@ impl TextAnimator {
                         cell.set_style(Style::default().bold());
                     }
                     FontStyle::Normal => {
-                        if audio.bass > 0.5 {
+                        if ctx.audio.bass > 0.5 {
                             cell.set_style(Style::default().bold());
                         }
                     }
@@ -196,19 +202,13 @@ impl TextAnimator {
         frame: &mut Frame,
         area: Rect,
         text: &str,
-        audio: &Arc<AudioData>,
-        color_scheme: &ColorScheme,
-        time: f32,
-        is_placeholder: bool,
+        ctx: &TextRenderCtx,
     ) {
         let rows = ascii_font::render_ascii(text);
         let font_height = ascii_font::ASCII_HEIGHT as usize;
         let text_width = ascii_font::ascii_width(text);
 
-        self.render_multiline_text(
-            frame, area, &rows, text_width, font_height,
-            audio, color_scheme, time, is_placeholder,
-        );
+        self.render_multiline_text(frame, area, &rows, text_width, font_height, ctx);
     }
 
     fn render_figlet_text(
@@ -216,19 +216,13 @@ impl TextAnimator {
         frame: &mut Frame,
         area: Rect,
         text: &str,
-        audio: &Arc<AudioData>,
-        color_scheme: &ColorScheme,
-        time: f32,
-        is_placeholder: bool,
+        ctx: &TextRenderCtx,
     ) {
         let rows = ascii_font::render_figlet(text);
         let font_height = ascii_font::FIGLET_HEIGHT as usize;
         let text_width = ascii_font::figlet_width(text);
 
-        self.render_multiline_text(
-            frame, area, &rows, text_width, font_height,
-            audio, color_scheme, time, is_placeholder,
-        );
+        self.render_multiline_text(frame, area, &rows, text_width, font_height, ctx);
     }
 
     fn render_multiline_text(
@@ -238,18 +232,15 @@ impl TextAnimator {
         rows: &[String],
         text_width: usize,
         font_height: usize,
-        audio: &Arc<AudioData>,
-        color_scheme: &ColorScheme,
-        time: f32,
-        is_placeholder: bool,
+        ctx: &TextRenderCtx,
     ) {
         if area.height < font_height as u16 {
             return;
         }
 
         // Get base colors (one per column of the rendered text)
-        let colors = if self.config.use_color_scheme || is_placeholder {
-            color_scheme.get_text_gradient(text_width, audio.intensity, time)
+        let colors = if self.config.use_color_scheme || ctx.is_placeholder {
+            ctx.color_scheme.get_text_gradient(text_width, ctx.audio.intensity, ctx.time)
         } else {
             self.get_custom_colors(text_width)
         };
@@ -310,14 +301,14 @@ impl TextAnimator {
 
                 // Get color for this column
                 let color_idx = col_idx.min(colors.len().saturating_sub(1));
-                let (r, g, b) = self.apply_animation_effect(colors[color_idx], col_idx, audio);
+                let (r, g, b) = self.apply_animation_effect(colors[color_idx], col_idx, ctx.audio);
 
                 if let Some(cell) = frame.buffer_mut().cell_mut((x, y)) {
                     cell.set_char(*ch);
                     cell.set_fg(Color::Rgb(r, g, b));
 
                     // Bold on bass hit
-                    if audio.bass > 0.5 {
+                    if ctx.audio.bass > 0.5 {
                         cell.set_style(Style::default().bold());
                     }
                 }
@@ -437,12 +428,10 @@ impl TextAnimator {
         &self,
         frame: &mut Frame,
         area: Rect,
-        audio: &Arc<AudioData>,
-        color_scheme: &ColorScheme,
-        time: f32,
+        ctx: &TextRenderCtx,
     ) {
         let text = "♪ cavibe ♪";
-        self.render_animated_text(frame, area, text, audio, color_scheme, time, true);
+        self.render_animated_text(frame, area, text, ctx);
     }
 
 }

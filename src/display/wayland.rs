@@ -73,6 +73,7 @@ struct RenderOptions<'a> {
     opacity: f32,
     color_scheme: &'a ColorScheme,
     waveform: &'a [f32],
+    spectrogram_history: &'a [Vec<f32>],
 
     // Text settings
     text_config: &'a TextConfig,
@@ -102,6 +103,8 @@ struct OutputSurface {
     // Per-monitor audio
     audio_source_key: Option<String>, // Key into audio_pipelines map
     audio_data: Arc<AudioData>,       // Cached per-surface audio data
+    // Spectrogram history (rolling buffer of frequency snapshots)
+    spectrogram_history: Vec<Vec<f32>>,
 }
 
 /// Wayland layer-shell wallpaper renderer with multi-monitor support
@@ -289,6 +292,7 @@ impl WallpaperState {
             opacity_override,
             audio_source_key: audio_source,
             audio_data: Arc::new(AudioData::default()),
+            spectrogram_history: Vec::new(),
         };
 
         self.surfaces.insert(output.id(), surface);
@@ -396,6 +400,13 @@ impl WallpaperState {
         let bar_spacing = (self.config.visualizer.bar_spacing as usize) * pixel_scale;
         let time = self.time;
 
+        // Update spectrogram history for this surface
+        surface.spectrogram_history.push(frequencies.clone());
+        if surface.spectrogram_history.len() > height {
+            let excess = surface.spectrogram_history.len() - height;
+            surface.spectrogram_history.drain(..excess);
+        }
+
         let render_opts = RenderOptions {
             style,
             bar_width,
@@ -405,20 +416,19 @@ impl WallpaperState {
             opacity,
             color_scheme: &color_scheme,
             waveform: &waveform,
+            spectrogram_history: &surface.spectrogram_history,
             text_config: &self.config.text,
         };
 
-        render_to_buffer(
-            canvas,
-            width,
-            height,
-            &frequencies,
+        let mut cvs = Canvas { data: canvas, width, height };
+        let frame_data = FrameData {
+            frequencies: &frequencies,
             intensity,
-            &track_title,
-            &track_artist,
+            track_title: &track_title,
+            track_artist: &track_artist,
             time,
-            &render_opts,
-        );
+        };
+        render_to_buffer(&mut cvs, &frame_data, &render_opts);
 
         // Attach and commit
         let wl_surf = surface.layer_surface.wl_surface();
@@ -446,38 +456,46 @@ impl WallpaperState {
     }
 }
 
-/// Render visualizer to an ARGB8888 buffer
-fn render_to_buffer(
-    canvas: &mut [u8],
+/// Mutable pixel buffer with dimensions
+struct Canvas<'a> {
+    data: &'a mut [u8],
     width: usize,
     height: usize,
-    frequencies: &[f32],
-    intensity: f32,
-    track_title: &Option<String>,
-    track_artist: &Option<String>,
-    time: f32,
-    opts: &RenderOptions,
-) {
-    // Clear to fully transparent (let wallpaper show through)
-    canvas.fill(0);
-
-    // Render bars
-    render_bars(canvas, width, height, frequencies, opts);
-
-    // Render text
-    render_text(canvas, width, height, track_title, track_artist, intensity, time, opts);
 }
 
-/// Write a pixel to the canvas with pre-multiplied alpha
-#[inline]
-fn put_pixel(canvas: &mut [u8], width: usize, x: usize, y: usize, r: u8, g: u8, b: u8, opacity: f32) {
-    let idx = (y * width + x) * 4;
-    if idx + 3 < canvas.len() {
-        canvas[idx] = (b as f32 * opacity) as u8;
-        canvas[idx + 1] = (g as f32 * opacity) as u8;
-        canvas[idx + 2] = (r as f32 * opacity) as u8;
-        canvas[idx + 3] = (opacity * 255.0) as u8;
+impl Canvas<'_> {
+    /// Write a pixel with pre-multiplied alpha
+    #[inline]
+    fn put_pixel(&mut self, x: usize, y: usize, r: u8, g: u8, b: u8, opacity: f32) {
+        let idx = (y * self.width + x) * 4;
+        if idx + 3 < self.data.len() {
+            self.data[idx] = (b as f32 * opacity) as u8;
+            self.data[idx + 1] = (g as f32 * opacity) as u8;
+            self.data[idx + 2] = (r as f32 * opacity) as u8;
+            self.data[idx + 3] = (opacity * 255.0) as u8;
+        }
     }
+}
+
+/// Per-frame data for text rendering
+struct FrameData<'a> {
+    frequencies: &'a [f32],
+    intensity: f32,
+    track_title: &'a Option<String>,
+    track_artist: &'a Option<String>,
+    time: f32,
+}
+
+/// Render visualizer to an ARGB8888 buffer
+fn render_to_buffer(canvas: &mut Canvas, frame: &FrameData, opts: &RenderOptions) {
+    // Clear to fully transparent (let wallpaper show through)
+    canvas.data.fill(0);
+
+    // Render bars
+    render_bars(canvas, frame.frequencies, opts);
+
+    // Render text
+    render_text(canvas, frame, opts);
 }
 
 /// Compute bar layout shared by all styles: text area, slot dimensions, frequency mapping
@@ -577,35 +595,28 @@ fn compute_bar_layout(
 }
 
 fn render_bars(
-    canvas: &mut [u8],
-    width: usize,
-    height: usize,
+    canvas: &mut Canvas,
     frequencies: &[f32],
     opts: &RenderOptions,
 ) {
-    let layout = match compute_bar_layout(width, height, frequencies, opts) {
+    let layout = match compute_bar_layout(canvas.width, canvas.height, frequencies, opts) {
         Some(l) => l,
         None => return,
     };
 
     match opts.style {
-        1 => render_bars_mirrored(canvas, width, height, &layout, opts),
-        2 => render_bars_wave(canvas, width, height, &layout, opts),
-        3 => render_bars_dots(canvas, width, height, &layout, opts),
-        4 => render_bars_blocks(canvas, width, height, &layout, opts),
-        5 => render_bars_oscilloscope(canvas, width, height, &layout, opts),
-        _ => render_bars_classic(canvas, width, height, &layout, opts),
+        1 => render_bars_mirrored(canvas, &layout, opts),
+        2 => render_bars_wave(canvas, &layout, opts),
+        3 => render_bars_dots(canvas, &layout, opts),
+        4 => render_bars_blocks(canvas, &layout, opts),
+        5 => render_bars_oscilloscope(canvas, &layout, opts),
+        6 => render_bars_spectrogram(canvas, &layout, opts),
+        _ => render_bars_classic(canvas, &layout, opts),
     }
 }
 
 /// Style 0: Classic vertical bars from bottom
-fn render_bars_classic(
-    canvas: &mut [u8],
-    width: usize,
-    height: usize,
-    layout: &BarLayout,
-    opts: &RenderOptions,
-) {
+fn render_bars_classic(canvas: &mut Canvas, layout: &BarLayout, opts: &RenderOptions) {
     for i in 0..layout.displayable {
         let magnitude = layout.render_frequencies[i];
         let bar_height = (magnitude * layout.bars_height as f32) as usize;
@@ -619,8 +630,8 @@ fn render_bars_classic(
 
             for bx in 0..opts.bar_width {
                 let x = x_start + bx;
-                if x < width && y < height {
-                    put_pixel(canvas, width, x, y, r, g, b, opts.opacity);
+                if x < canvas.width && y < canvas.height {
+                    canvas.put_pixel(x, y, r, g, b, opts.opacity);
                 }
             }
         }
@@ -628,13 +639,7 @@ fn render_bars_classic(
 }
 
 /// Style 1: Mirrored bars growing from center
-fn render_bars_mirrored(
-    canvas: &mut [u8],
-    width: usize,
-    height: usize,
-    layout: &BarLayout,
-    opts: &RenderOptions,
-) {
+fn render_bars_mirrored(canvas: &mut Canvas, layout: &BarLayout, opts: &RenderOptions) {
     let center_y = layout.bars_y_start + layout.bars_height / 2;
 
     for i in 0..layout.displayable {
@@ -652,8 +657,8 @@ fn render_bars_mirrored(
             if y_up >= layout.bars_y_start {
                 for bx in 0..opts.bar_width {
                     let x = x_start + bx;
-                    if x < width && y_up < height {
-                        put_pixel(canvas, width, x, y_up, r, g, b, opts.opacity);
+                    if x < canvas.width && y_up < canvas.height {
+                        canvas.put_pixel(x, y_up, r, g, b, opts.opacity);
                     }
                 }
             }
@@ -663,8 +668,8 @@ fn render_bars_mirrored(
             if y_down < layout.bars_y_start + layout.bars_height {
                 for bx in 0..opts.bar_width {
                     let x = x_start + bx;
-                    if x < width && y_down < height {
-                        put_pixel(canvas, width, x, y_down, r, g, b, opts.opacity);
+                    if x < canvas.width && y_down < canvas.height {
+                        canvas.put_pixel(x, y_down, r, g, b, opts.opacity);
                     }
                 }
             }
@@ -673,13 +678,7 @@ fn render_bars_mirrored(
 }
 
 /// Style 2: Wave centered on middle row
-fn render_bars_wave(
-    canvas: &mut [u8],
-    width: usize,
-    height: usize,
-    layout: &BarLayout,
-    opts: &RenderOptions,
-) {
+fn render_bars_wave(canvas: &mut Canvas, layout: &BarLayout, opts: &RenderOptions) {
     let center_y = layout.bars_y_start + layout.bars_height / 2;
     // Use a narrower bar for wave style
     let wave_width = (opts.bar_width / 3).max(1);
@@ -692,14 +691,14 @@ fn render_bars_wave(
 
         for offset in -wave_height..=wave_height {
             let y = (center_y as isize + offset) as usize;
-            if y >= layout.bars_y_start && y < layout.bars_y_start + layout.bars_height && y < height {
+            if y >= layout.bars_y_start && y < layout.bars_y_start + layout.bars_height && y < canvas.height {
                 let intensity = 1.0 - (offset.unsigned_abs() as f32 / wave_height.max(1) as f32);
                 let (r, g, b) = opts.color_scheme.get_color(position, intensity);
 
                 for bx in 0..wave_width {
                     let x = x_start + bx;
-                    if x < width {
-                        put_pixel(canvas, width, x, y, r, g, b, opts.opacity * intensity);
+                    if x < canvas.width {
+                        canvas.put_pixel(x, y, r, g, b, opts.opacity * intensity);
                     }
                 }
             }
@@ -708,13 +707,7 @@ fn render_bars_wave(
 }
 
 /// Style 3: Dots at peak with trailing dots below
-fn render_bars_dots(
-    canvas: &mut [u8],
-    width: usize,
-    height: usize,
-    layout: &BarLayout,
-    opts: &RenderOptions,
-) {
+fn render_bars_dots(canvas: &mut Canvas, layout: &BarLayout, opts: &RenderOptions) {
     let dot_radius = (opts.bar_width / 3).max(2);
 
     for i in 0..layout.displayable {
@@ -732,8 +725,8 @@ fn render_bars_dots(
                 if dx * dx + dy * dy <= r2 {
                     let x = (x_center as isize + dx) as usize;
                     let y = (peak_y as isize + dy) as usize;
-                    if x < width && y >= layout.bars_y_start && y < layout.bars_y_start + layout.bars_height && y < height {
-                        put_pixel(canvas, width, x, y, r, g, b, opts.opacity);
+                    if x < canvas.width && y >= layout.bars_y_start && y < layout.bars_y_start + layout.bars_height && y < canvas.height {
+                        canvas.put_pixel(x, y, r, g, b, opts.opacity);
                     }
                 }
             }
@@ -751,8 +744,8 @@ fn render_bars_dots(
             let (tr, tg, tb) = opts.color_scheme.get_color(position, trail_intensity * magnitude);
             for bx in 0..trail_width {
                 let x = x_center - trail_width / 2 + bx;
-                if x < width && y < height {
-                    put_pixel(canvas, width, x, y, tr, tg, tb, opts.opacity * trail_intensity);
+                if x < canvas.width && y < canvas.height {
+                    canvas.put_pixel(x, y, tr, tg, tb, opts.opacity * trail_intensity);
                 }
             }
         }
@@ -760,13 +753,7 @@ fn render_bars_dots(
 }
 
 /// Style 4: Blocks with gradient fade at top edge
-fn render_bars_blocks(
-    canvas: &mut [u8],
-    width: usize,
-    height: usize,
-    layout: &BarLayout,
-    opts: &RenderOptions,
-) {
+fn render_bars_blocks(canvas: &mut Canvas, layout: &BarLayout, opts: &RenderOptions) {
     let fade_height = (opts.bar_width / 2).max(2);
 
     for i in 0..layout.displayable {
@@ -785,8 +772,8 @@ fn render_bars_blocks(
 
             for bx in 0..opts.bar_width {
                 let x = x_start + bx;
-                if x < width && y < height {
-                    put_pixel(canvas, width, x, y, r, g, b, opts.opacity);
+                if x < canvas.width && y < canvas.height {
+                    canvas.put_pixel(x, y, r, g, b, opts.opacity);
                 }
             }
         }
@@ -800,11 +787,11 @@ fn render_bars_blocks(
             for fy in 0..fade_height.min(top_y.saturating_sub(layout.bars_y_start)) {
                 let y = top_y - fy;
                 let fade = fractional * (1.0 - fy as f32 / fade_height as f32);
-                if y < height {
+                if y < canvas.height {
                     for bx in 0..opts.bar_width {
                         let x = x_start + bx;
-                        if x < width {
-                            put_pixel(canvas, width, x, y, r, g, b, opts.opacity * fade);
+                        if x < canvas.width {
+                            canvas.put_pixel(x, y, r, g, b, opts.opacity * fade);
                         }
                     }
                 }
@@ -814,13 +801,7 @@ fn render_bars_blocks(
 }
 
 /// Style 5: Oscilloscope — raw waveform as a continuous line
-fn render_bars_oscilloscope(
-    canvas: &mut [u8],
-    width: usize,
-    height: usize,
-    layout: &BarLayout,
-    opts: &RenderOptions,
-) {
+fn render_bars_oscilloscope(canvas: &mut Canvas, layout: &BarLayout, opts: &RenderOptions) {
     if opts.waveform.is_empty() {
         return;
     }
@@ -833,9 +814,9 @@ fn render_bars_oscilloscope(
 
     let mut prev_y: Option<usize> = None;
 
-    for x in 0..width {
+    for x in 0..canvas.width {
         // Map pixel x to sample index
-        let sample_idx = (x * num_samples) / width;
+        let sample_idx = (x * num_samples) / canvas.width;
         let sample = opts.waveform[sample_idx.min(num_samples - 1)];
 
         // Map sample (-1..1) to pixel y within bar area
@@ -843,7 +824,7 @@ fn render_bars_oscilloscope(
             .max(layout.bars_y_start)
             .min(layout.bars_y_start + layout.bars_height - 1);
 
-        let position = x as f32 / width as f32;
+        let position = x as f32 / canvas.width as f32;
         let intensity = sample.abs().min(1.0);
         let (r, g, b) = opts.color_scheme.get_color(position, intensity.max(0.3));
 
@@ -862,8 +843,8 @@ fn render_bars_oscilloscope(
             for t in 0..thickness {
                 let px = x;
                 let py = fill_y + t;
-                if px < width && py >= layout.bars_y_start && py < layout.bars_y_start + layout.bars_height && py < height {
-                    put_pixel(canvas, width, px, py, r, g, b, opts.opacity);
+                if px < canvas.width && py >= layout.bars_y_start && py < layout.bars_y_start + layout.bars_height && py < canvas.height {
+                    canvas.put_pixel(px, py, r, g, b, opts.opacity);
                 }
             }
         }
@@ -872,17 +853,45 @@ fn render_bars_oscilloscope(
     }
 }
 
-fn render_text(
-    canvas: &mut [u8],
-    width: usize,
-    height: usize,
-    track_title: &Option<String>,
-    track_artist: &Option<String>,
-    intensity: f32,
-    time: f32,
-    opts: &RenderOptions,
-) {
+/// Style 6: Spectrogram — scrolling 2D heatmap (X=frequency, Y=time)
+fn render_bars_spectrogram(canvas: &mut Canvas, layout: &BarLayout, opts: &RenderOptions) {
+    let history = opts.spectrogram_history;
+    if history.is_empty() {
+        return;
+    }
+
+    let num_rows = history.len().min(layout.bars_height);
+
+    for (row_idx, slice) in history.iter().rev().take(num_rows).enumerate() {
+        // row_idx 0 = newest (bottom), so draw from bottom up
+        let y = layout.bars_y_start + layout.bars_height - 1 - row_idx;
+        if y >= layout.bars_y_start + layout.bars_height {
+            continue;
+        }
+
+        let num_freqs = slice.len();
+        if num_freqs == 0 {
+            continue;
+        }
+
+        for x in 0..canvas.width {
+            let freq_idx = (x * num_freqs) / canvas.width;
+            let magnitude = slice[freq_idx.min(num_freqs - 1)];
+            let position = x as f32 / canvas.width as f32;
+            let (r, g, b) = opts.color_scheme.get_color(position, magnitude);
+            canvas.put_pixel(x, y, r, g, b, opts.opacity * magnitude.max(0.05));
+        }
+    }
+}
+
+fn render_text(canvas: &mut Canvas, frame: &FrameData, opts: &RenderOptions) {
     let text_config = opts.text_config;
+    let width = canvas.width;
+    let height = canvas.height;
+    let track_title = frame.track_title;
+    let track_artist = frame.track_artist;
+    let intensity = frame.intensity;
+    let time = frame.time;
 
     // Debug: log text config on first frame (time near 0)
     if time < 0.1 {
@@ -989,11 +998,11 @@ fn render_text(
         for py in bg_y_start..bg_y_end {
             for px in bg_x_start..bg_x_end {
                 let idx = (py * width + px) * 4;
-                if idx + 3 < canvas.len() {
-                    canvas[idx] = (bg_color.b as f32 * opts.opacity) as u8;
-                    canvas[idx + 1] = (bg_color.g as f32 * opts.opacity) as u8;
-                    canvas[idx + 2] = (bg_color.r as f32 * opts.opacity) as u8;
-                    canvas[idx + 3] = (opts.opacity * 255.0 * 0.8) as u8; // Slightly transparent
+                if idx + 3 < canvas.data.len() {
+                    canvas.data[idx] = (bg_color.b as f32 * opts.opacity) as u8;
+                    canvas.data[idx + 1] = (bg_color.g as f32 * opts.opacity) as u8;
+                    canvas.data[idx + 2] = (bg_color.r as f32 * opts.opacity) as u8;
+                    canvas.data[idx + 3] = (opts.opacity * 255.0 * 0.8) as u8; // Slightly transparent
                 }
             }
         }
@@ -1051,9 +1060,9 @@ fn render_text(
         match text_config.font_style {
             FontStyle::Bold => {
                 // Render with slight offset for bold effect
-                render_char(canvas, width, height, char_x, char_y, ch, r, g, b, scale, char_opacity);
-                render_char(canvas, width, height, char_x + 1, char_y, ch, r, g, b, scale, char_opacity);
-                render_char(canvas, width, height, char_x, char_y + 1, ch, r, g, b, scale, char_opacity);
+                render_char(canvas, char_x, char_y, ch, r, g, b, scale, char_opacity);
+                render_char(canvas, char_x + 1, char_y, ch, r, g, b, scale, char_opacity);
+                render_char(canvas, char_x, char_y + 1, ch, r, g, b, scale, char_opacity);
             }
             FontStyle::Figlet => {
                 // Render with outline for figlet-like effect
@@ -1061,7 +1070,7 @@ fn render_text(
                 for ox in [0isize, 2].iter() {
                     for oy in [0isize, 2].iter() {
                         if *ox != 1 || *oy != 1 {
-                            render_char(canvas, width, height,
+                            render_char(canvas,
                                 (char_x as isize + ox) as usize,
                                 (char_y as isize + oy) as usize,
                                 ch, outline_color.0, outline_color.1, outline_color.2,
@@ -1069,10 +1078,10 @@ fn render_text(
                         }
                     }
                 }
-                render_char(canvas, width, height, char_x + 1, char_y + 1, ch, r, g, b, scale, char_opacity);
+                render_char(canvas, char_x + 1, char_y + 1, ch, r, g, b, scale, char_opacity);
             }
             FontStyle::Normal | FontStyle::Ascii => {
-                render_char(canvas, width, height, char_x, char_y, ch, r, g, b, scale, char_opacity);
+                render_char(canvas, char_x, char_y, ch, r, g, b, scale, char_opacity);
             }
         }
     }
@@ -1135,7 +1144,8 @@ fn get_char_bitmap(ch: char) -> Option<[u8; 8]> {
     })
 }
 
-fn render_char(canvas: &mut [u8], width: usize, height: usize, x: usize, y: usize, ch: char, r: u8, g: u8, b: u8, scale: usize, opacity: f32) {
+#[allow(clippy::too_many_arguments)]
+fn render_char(canvas: &mut Canvas, x: usize, y: usize, ch: char, r: u8, g: u8, b: u8, scale: usize, opacity: f32) {
     let bitmap = match get_char_bitmap(ch) {
         Some(b) => b,
         None => return,
@@ -1149,15 +1159,8 @@ fn render_char(canvas: &mut [u8], width: usize, height: usize, x: usize, y: usiz
                     for sx in 0..scale {
                         let px = x + col * scale + sx;
                         let py = y + row_idx * scale + sy;
-                        if px < width && py < height {
-                            let idx = (py * width + px) * 4;
-                            if idx + 3 < canvas.len() {
-                                // Pre-multiplied alpha: RGB values must be multiplied by alpha
-                                canvas[idx] = (b as f32 * opacity) as u8;
-                                canvas[idx + 1] = (g as f32 * opacity) as u8;
-                                canvas[idx + 2] = (r as f32 * opacity) as u8;
-                                canvas[idx + 3] = (opacity * 255.0) as u8;
-                            }
+                        if px < canvas.width && py < canvas.height {
+                            canvas.put_pixel(px, py, r, g, b, opacity);
                         }
                     }
                 }

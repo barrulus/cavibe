@@ -1,3 +1,5 @@
+use std::sync::Mutex;
+
 use crate::audio::AudioData;
 use crate::color::ColorScheme;
 use crate::config::VisualizerConfig;
@@ -498,6 +500,73 @@ fn bresenham_line(grid: &mut [bool], grid_w: usize, grid_h: usize, x0: usize, y0
     }
 }
 
+/// Spectrogram/waterfall style - scrolling 2D heatmap where X=frequency, Y=time
+pub struct SpectrogramStyle {
+    history: Mutex<Vec<Vec<f32>>>,
+}
+
+impl SpectrogramStyle {
+    const fn new() -> Self {
+        Self {
+            history: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl Visualizer for SpectrogramStyle {
+    fn name(&self) -> &'static str {
+        "Spectrogram"
+    }
+
+    fn render(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        audio: &AudioData,
+        color_scheme: &ColorScheme,
+        _config: &VisualizerConfig,
+    ) {
+        if area.width == 0 || area.height == 0 || audio.frequencies.is_empty() {
+            return;
+        }
+
+        let max_rows = area.height as usize;
+        let mut history = self.history.lock().unwrap();
+
+        // Push current frame and trim to visible height
+        history.push(audio.frequencies.clone());
+        if history.len() > max_rows {
+            let excess = history.len() - max_rows;
+            history.drain(..excess);
+        }
+
+        let num_cols = area.width as usize;
+
+        // Render: index 0 = oldest (top), last = newest (bottom)
+        for (row_idx, slice) in history.iter().enumerate() {
+            let y = area.y + row_idx as u16;
+            if y >= area.y + area.height {
+                break;
+            }
+
+            for col in 0..num_cols {
+                let freq_idx = (col * slice.len()) / num_cols;
+                let magnitude = slice[freq_idx.min(slice.len() - 1)];
+                let position = col as f32 / num_cols as f32;
+                let (r, g, b) = color_scheme.get_color(position, magnitude);
+
+                let cell = frame.buffer_mut().cell_mut((area.x + col as u16, y));
+                if let Some(cell) = cell {
+                    cell.set_char('█');
+                    cell.set_fg(Color::Rgb(r, g, b));
+                }
+            }
+        }
+    }
+}
+
+static SPECTROGRAM_STYLE: SpectrogramStyle = SpectrogramStyle::new();
+
 /// All available visualizer styles
 pub static VISUALIZER_STYLES: &[&(dyn Visualizer + Sync)] = &[
     &ClassicBars,
@@ -506,4 +575,5 @@ pub static VISUALIZER_STYLES: &[&(dyn Visualizer + Sync)] = &[
     &DotsStyle,
     &BlocksStyle,
     &OscilloscopeStyle,
+    &SPECTROGRAM_STYLE,
 ];

@@ -100,7 +100,7 @@ impl FrequencyAnalyzer {
         let half_bars = self.num_bars / 2;
         let mut half_magnitudes = vec![0.0; half_bars];
 
-        for bar in 0..half_bars {
+        for (bar, magnitude_out) in half_magnitudes.iter_mut().enumerate() {
             // Calculate frequency range for this bar (logarithmic scale)
             let bar_start = (bar as f32) / (half_bars as f32);
             let bar_end = ((bar + 1) as f32) / (half_bars as f32);
@@ -125,7 +125,7 @@ impl FrequencyAnalyzer {
 
             let avg = sum / (bin_end - bin_start) as f32;
             // Apply sensitivity scaling (base scale + user sensitivity multiplier)
-            half_magnitudes[bar] = (avg * 0.02 * self.sensitivity).min(1.0);
+            *magnitude_out = (avg * 0.02 * self.sensitivity).min(1.0);
         }
 
         // Mirror: bass on edges, treble in middle

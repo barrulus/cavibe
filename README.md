@@ -6,7 +6,7 @@ Cavibe captures system audio, performs frequency analysis, and displays colorful
 
 ## Features
 
-- **Multiple visualizer styles**: Classic bars, mirrored, wave, dots, blocks, oscilloscope
+- **Multiple visualizer styles**: Classic bars, mirrored, wave, dots, blocks, oscilloscope, spectrogram
 - **Color schemes**: Spectrum, rainbow, fire, ocean, forest, purple, monochrome
 - **Animated song text**: Pulsing colors synced to audio intensity with multiple font styles and animations
 - **MPRIS integration**: Displays current track from Spotify, MPD, VLC, etc.
