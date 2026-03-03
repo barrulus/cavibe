@@ -238,22 +238,66 @@ impl AudioCapture {
     /// Queries PulseAudio/PipeWire for the default sink and uses its monitor
     /// source, so we always capture from whatever output the user is listening to.
     fn find_monitor_source() -> Option<String> {
-        // Get the default sink name and append ".monitor" to capture its output
-        if let Ok(output) = std::process::Command::new("pactl")
-            .args(["get-default-sink"])
-            .output()
-        {
-            if output.status.success() {
-                let sink_name = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !sink_name.is_empty() {
-                    let monitor = format!("{}.monitor", sink_name);
-                    info!("Using default sink monitor: {}", monitor);
-                    return Some(monitor);
-                }
+        // Use native libpulse API to get the default sink name
+        use pulse::context::{Context, State as ContextState};
+        use pulse::mainloop::standard::{IterateResult, Mainloop};
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+
+        let mainloop = Rc::new(RefCell::new(Mainloop::new()?));
+        let context = Rc::new(RefCell::new(
+            Context::new(&*mainloop.borrow(), "cavibe-detect")?
+        ));
+
+        context
+            .borrow_mut()
+            .connect(None, pulse::context::FlagSet::NOFLAGS, None)
+            .ok()?;
+
+        // Wait for context to be ready
+        loop {
+            match mainloop.borrow_mut().iterate(true) {
+                IterateResult::Success(_) => {}
+                _ => return None,
+            }
+            match context.borrow().get_state() {
+                ContextState::Ready => break,
+                ContextState::Failed | ContextState::Terminated => return None,
+                _ => {}
             }
         }
 
-        warn!("Could not determine default sink, using PulseAudio default source");
-        None
+        let sink_name = Rc::new(RefCell::new(None::<String>));
+        let done = Rc::new(Cell::new(false));
+
+        let sink_clone = sink_name.clone();
+        let done_clone = done.clone();
+
+        let _op = context
+            .borrow()
+            .introspect()
+            .get_server_info(move |info| {
+                if let Some(ref name) = info.default_sink_name {
+                    *sink_clone.borrow_mut() = Some(name.to_string());
+                }
+                done_clone.set(true);
+            });
+
+        while !done.get() {
+            match mainloop.borrow_mut().iterate(true) {
+                IterateResult::Success(_) => {}
+                _ => return None,
+            }
+        }
+
+        let result = sink_name.borrow().as_ref().map(|sink| {
+            let monitor = format!("{}.monitor", sink);
+            info!("Using default sink monitor: {}", monitor);
+            monitor
+        });
+        if result.is_none() {
+            warn!("Could not determine default sink, using PulseAudio default source");
+        }
+        result
     }
 }
