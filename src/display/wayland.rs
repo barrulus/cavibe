@@ -669,22 +669,11 @@ impl CompositorHandler for WallpaperState {
     fn frame(
         &mut self,
         _conn: &Connection,
-        qh: &QueueHandle<Self>,
-        surface: &wl_surface::WlSurface,
+        _qh: &QueueHandle<Self>,
+        _surface: &wl_surface::WlSurface,
         _time: u32,
     ) {
-        if !self.active {
-            // Go idle — don't re-request frame callback, don't draw.
-            // The main loop will kick-start us when audio resumes.
-            return;
-        }
-
-        // Request next frame BEFORE drawing, because the compositor only
-        // sends a frame callback for commits that have a listener attached.
-        surface.frame(qh, surface.clone());
-
-        // Draw current frame (this calls commit(), which the callback above will fire for)
-        self.draw_surface(surface);
+        // Rendering is driven by the main loop, not frame callbacks.
     }
 
     fn surface_enter(
@@ -751,7 +740,7 @@ impl LayerShellHandler for WallpaperState {
     fn configure(
         &mut self,
         _conn: &Connection,
-        qh: &QueueHandle<Self>,
+        _qh: &QueueHandle<Self>,
         layer: &LayerSurface,
         configure: LayerSurfaceConfigure,
         _serial: u32,
@@ -794,14 +783,9 @@ impl LayerShellHandler for WallpaperState {
         surface.pool = None;
         surface.configured = true;
 
-        // Request frame callback then do initial draw (callback must be
-        // attached before commit so the compositor knows to send the next one)
+        // Initial draw so the surface isn't blank before the main loop catches up
         let wl_surface = layer.wl_surface();
-        wl_surface.frame(qh, wl_surface.clone());
-
-        // Initial draw
-        let wl_surface_clone = wl_surface.clone();
-        self.draw_surface(&wl_surface_clone);
+        self.draw_surface(wl_surface);
     }
 }
 
@@ -1084,17 +1068,8 @@ pub async fn run(config: Config, ipc_rx: mpsc::Receiver<IpcCommand>) -> Result<(
             .any(|s| s.audio_data.intensity > 0.001);
 
         if has_audio && !state.active {
-            // Audio just started — kick-start frame callbacks on all surfaces
             state.active = true;
-            for surface in state.surfaces.values() {
-                if surface.configured {
-                    let wl_surface = surface.layer_surface.wl_surface();
-                    wl_surface.frame(&qh, wl_surface.clone());
-                    wl_surface.commit();
-                }
-            }
         } else if !has_audio && state.active {
-            // Audio stopped — let frame callbacks expire (they'll check active flag)
             state.active = false;
         }
 
@@ -1105,6 +1080,19 @@ pub async fn run(config: Config, ipc_rx: mpsc::Receiver<IpcCommand>) -> Result<(
         let dt = state.last_frame.elapsed().as_secs_f32();
         state.last_frame = Instant::now();
         state.update(dt);
+
+        // Render all surfaces from the main loop
+        if state.active {
+            let surface_keys: Vec<_> = state.surfaces.keys().cloned().collect();
+            for key in surface_keys {
+                if let Some(surface) = state.surfaces.get(&key) {
+                    if surface.configured {
+                        let wl_surface = surface.layer_surface.wl_surface().clone();
+                        state.draw_surface(&wl_surface);
+                    }
+                }
+            }
+        }
 
         // Process IPC commands (non-blocking)
         let mut pending = PendingChanges::default();
