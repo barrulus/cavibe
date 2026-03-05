@@ -95,6 +95,8 @@ struct DragState {
     pending_dy: f64,
     /// Whether to save margins (set on release)
     save_pending: bool,
+    /// Which surface is being dragged (by wl_output ObjectId)
+    surface_id: Option<wayland_client::backend::ObjectId>,
 }
 
 /// Per-output surface state
@@ -117,6 +119,9 @@ struct OutputSurface {
     audio_data: Arc<AudioData>,       // Cached per-surface audio data
     // Spectrogram history (rolling buffer of frequency snapshots)
     spectrogram_history: Vec<Vec<f32>>,
+    // Per-surface margin state (for independent drag positioning)
+    margin_top: i32,
+    margin_left: i32,
     // Reusable pixel canvas (RGBA)
     canvas: renderer::Canvas,
 }
@@ -309,6 +314,7 @@ impl WallpaperState {
         // Get per-monitor overrides
         let (color_override, style_override, opacity_override, audio_source) = self.get_monitor_overrides(&output_name);
 
+        let (mt, _, _, ml) = self.config.wallpaper.effective_margins();
         let surface = OutputSurface {
             output_name,
             layer_surface,
@@ -325,6 +331,8 @@ impl WallpaperState {
             audio_source_key: audio_source,
             audio_data: Arc::new(AudioData::default()),
             spectrogram_history: Vec::new(),
+            margin_top: mt,
+            margin_left: ml,
             canvas: renderer::Canvas::new(0, 0),
         };
 
@@ -494,51 +502,63 @@ impl WallpaperState {
     }
 
     /// Convert current anchor to top-left for drag positioning.
-    /// Calculates equivalent margin_left/margin_top to preserve the surface position.
+    /// Calculates equivalent margin_left/margin_top per-surface to preserve each surface's position.
     fn convert_to_topleft_anchor(&mut self) {
-        if self.config.wallpaper.anchor == WallpaperAnchor::TopLeft {
+        let original_anchor = self.config.wallpaper.anchor;
+        if original_anchor == WallpaperAnchor::TopLeft {
+            // Already top-left; sync per-surface margins from config
+            let (mt, _, _, ml) = self.config.wallpaper.effective_margins();
+            for surface in self.surfaces.values_mut() {
+                surface.margin_top = mt;
+                surface.margin_left = ml;
+            }
             return;
         }
 
-        // Get the first surface's dimensions to calculate position
-        let Some(surface) = self.surfaces.values().next() else { return };
-        let sw = surface.screen_width as i32;
-        let sh = surface.screen_height as i32;
-        let w = surface.width as i32;
-        let h = surface.height as i32;
         let (mt, mr, mb, ml) = self.config.wallpaper.effective_margins();
 
-        // Calculate current top-left position based on anchor
-        let (x, y) = match self.config.wallpaper.anchor {
-            WallpaperAnchor::TopLeft => (ml, mt),
-            WallpaperAnchor::Top => ((sw - w) / 2, mt),
-            WallpaperAnchor::TopRight => (sw - w - mr, mt),
-            WallpaperAnchor::Left => (ml, (sh - h) / 2),
-            WallpaperAnchor::Center => ((sw - w) / 2, (sh - h) / 2),
-            WallpaperAnchor::Right => (sw - w - mr, (sh - h) / 2),
-            WallpaperAnchor::BottomLeft => (ml, sh - h - mb),
-            WallpaperAnchor::Bottom => ((sw - w) / 2, sh - h - mb),
-            WallpaperAnchor::BottomRight => (sw - w - mr, sh - h - mb),
-            WallpaperAnchor::Fullscreen => (0, 0),
-        };
+        // Apply per-surface: each monitor has its own screen dimensions
+        let anchor_bits = Anchor::TOP | Anchor::LEFT;
+        for surface in self.surfaces.values_mut() {
+            let sw = surface.screen_width as i32;
+            let sh = surface.screen_height as i32;
+            let w = surface.width as i32;
+            let h = surface.height as i32;
 
+            // Calculate current top-left position based on original anchor
+            let (x, y) = match original_anchor {
+                WallpaperAnchor::TopLeft => (ml, mt),
+                WallpaperAnchor::Top => ((sw - w) / 2, mt),
+                WallpaperAnchor::TopRight => (sw - w - mr, mt),
+                WallpaperAnchor::Left => (ml, (sh - h) / 2),
+                WallpaperAnchor::Center => ((sw - w) / 2, (sh - h) / 2),
+                WallpaperAnchor::Right => (sw - w - mr, (sh - h) / 2),
+                WallpaperAnchor::BottomLeft => (ml, sh - h - mb),
+                WallpaperAnchor::Bottom => ((sw - w) / 2, sh - h - mb),
+                WallpaperAnchor::BottomRight => (sw - w - mr, sh - h - mb),
+                WallpaperAnchor::Fullscreen => (0, 0),
+            };
+
+            surface.margin_top = y;
+            surface.margin_left = x;
+            surface.layer_surface.set_anchor(anchor_bits);
+            surface.layer_surface.set_margin(y, 0, 0, x);
+            let (ew, eh) = surface.explicit_size.unwrap_or((surface.width, surface.height));
+            surface.layer_surface.set_size(ew, eh);
+            surface.explicit_size = Some((ew, eh));
+            surface.layer_surface.commit();
+        }
+
+        // Update global config
         self.config.wallpaper.anchor = WallpaperAnchor::TopLeft;
         self.config.wallpaper.margin = 0;
-        self.config.wallpaper.margin_top = y;
-        self.config.wallpaper.margin_left = x;
         self.config.wallpaper.margin_right = 0;
         self.config.wallpaper.margin_bottom = 0;
 
-        // Apply the new anchor + margins to all surfaces.
-        // Top-left anchor requires explicit size — use current surface dimensions.
-        let anchor = Anchor::TOP | Anchor::LEFT;
-        for surface in self.surfaces.values_mut() {
-            surface.layer_surface.set_anchor(anchor);
-            surface.layer_surface.set_margin(y, 0, 0, x);
-            let (sw, sh) = surface.explicit_size.unwrap_or((surface.width, surface.height));
-            surface.layer_surface.set_size(sw, sh);
-            surface.explicit_size = Some((sw, sh));
-            surface.layer_surface.commit();
+        // Store first surface's margins as global config defaults
+        if let Some(surface) = self.surfaces.values().next() {
+            self.config.wallpaper.margin_top = surface.margin_top;
+            self.config.wallpaper.margin_left = surface.margin_left;
         }
 
         // Also store size in config so it persists
@@ -551,20 +571,19 @@ impl WallpaperState {
             }
         }
 
-        info!("Converted to top-left anchor for drag: position ({}, {})", x, y);
+        info!("Converted to top-left anchor for drag");
     }
 
-    /// Apply a drag delta (in surface-local pixels) to the margins.
+    /// Apply a drag delta (in surface-local pixels) to the dragged surface only.
     /// Requires top-left anchor (call convert_to_topleft_anchor first).
     fn apply_drag_delta(&mut self, dx: f64, dy: f64) {
-        self.config.wallpaper.margin_left += dx as i32;
-        self.config.wallpaper.margin_top += dy as i32;
-
-        let mt = self.config.wallpaper.margin_top;
-        let ml = self.config.wallpaper.margin_left;
-        for surface in self.surfaces.values() {
-            surface.layer_surface.set_margin(mt, 0, 0, ml);
-            surface.layer_surface.commit();
+        if let Some(ref surface_id) = self.drag.surface_id {
+            if let Some(surface) = self.surfaces.get_mut(surface_id) {
+                surface.margin_left += dx as i32;
+                surface.margin_top += dy as i32;
+                surface.layer_surface.set_margin(surface.margin_top, 0, 0, surface.margin_left);
+                surface.layer_surface.commit();
+            }
         }
     }
 
@@ -638,6 +657,50 @@ impl WallpaperState {
             }
             Err(e) => {
                 tracing::warn!("Failed to read config for save: {}", e);
+            }
+        }
+    }
+
+    /// Save only position/margin data to config (used on drag release).
+    /// Unlike save_state_to_config, this does NOT write the `draggable` flag,
+    /// so disabling drag persists correctly across restarts.
+    fn save_position_to_config(&self) {
+        let Some(path) = Config::default_path() else {
+            return;
+        };
+
+        if !path.exists() {
+            return; // Don't create config just for position save
+        }
+
+        match std::fs::read_to_string(&path) {
+            Ok(content) => {
+                match content.parse::<toml_edit::DocumentMut>() {
+                    Ok(mut doc) => {
+                        if !doc.contains_key("wallpaper") {
+                            doc["wallpaper"] = toml_edit::table();
+                        }
+                        doc["wallpaper"]["anchor"] = toml_edit::value(self.config.wallpaper.anchor.name());
+                        doc["wallpaper"]["margin"] = toml_edit::value(self.config.wallpaper.margin as i64);
+                        doc["wallpaper"]["margin_top"] = toml_edit::value(self.config.wallpaper.margin_top as i64);
+                        doc["wallpaper"]["margin_right"] = toml_edit::value(self.config.wallpaper.margin_right as i64);
+                        doc["wallpaper"]["margin_bottom"] = toml_edit::value(self.config.wallpaper.margin_bottom as i64);
+                        doc["wallpaper"]["margin_left"] = toml_edit::value(self.config.wallpaper.margin_left as i64);
+                        if let Some(ref w) = self.config.wallpaper.width {
+                            doc["wallpaper"]["width"] = toml_edit::value(w.as_str());
+                        }
+                        if let Some(ref h) = self.config.wallpaper.height {
+                            doc["wallpaper"]["height"] = toml_edit::value(h.as_str());
+                        }
+                        let _ = std::fs::write(&path, doc.to_string());
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to parse config for position save: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to read config for position save: {}", e);
             }
         }
     }
@@ -865,6 +928,10 @@ impl PointerHandler for WallpaperState {
         for event in events {
             match event.kind {
                 PointerEventKind::Enter { .. } => {
+                    // Track which surface the pointer entered
+                    if let Some((id, _)) = self.surfaces.iter().find(|(_, s)| s.layer_surface.wl_surface() == &event.surface) {
+                        self.drag.surface_id = Some(id.clone());
+                    }
                     self.drag.last_x = event.position.0;
                     self.drag.last_y = event.position.1;
                 }
@@ -1227,6 +1294,9 @@ pub async fn run(config: Config, ipc_rx: mpsc::Receiver<IpcCommand>) -> Result<(
             let (mt, mr, mb, ml) = state.config.wallpaper.effective_margins();
 
             for surface in state.surfaces.values_mut() {
+                // Sync per-surface margins from global config
+                surface.margin_top = mt;
+                surface.margin_left = ml;
                 surface.layer_surface.set_anchor(anchor);
                 surface.layer_surface.set_margin(mt, mr, mb, ml);
 
@@ -1260,10 +1330,17 @@ pub async fn run(config: Config, ipc_rx: mpsc::Receiver<IpcCommand>) -> Result<(
             state.apply_drag_delta(dx, dy);
         }
 
-        // Save margins after drag release
+        // Save margins after drag release (position only, not draggable flag)
         if state.drag.save_pending {
             state.drag.save_pending = false;
-            state.save_state_to_config();
+            // Sync dragged surface's margins to global config before saving
+            if let Some(ref surface_id) = state.drag.surface_id {
+                if let Some(surface) = state.surfaces.get(surface_id) {
+                    state.config.wallpaper.margin_top = surface.margin_top;
+                    state.config.wallpaper.margin_left = surface.margin_left;
+                }
+            }
+            state.save_position_to_config();
         }
 
         // Handle drag mode change — update keyboard interactivity and anchor
