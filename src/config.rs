@@ -48,6 +48,12 @@ pub struct DisplayConfig {
     pub mode: DisplayMode,
     pub rotate_styles: bool,
     pub rotation_interval_secs: u64,
+    #[serde(default = "default_max_fps")]
+    pub max_fps: u32,
+}
+
+fn default_max_fps() -> u32 {
+    60
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -527,6 +533,7 @@ impl Default for Config {
                 mode: DisplayMode::Terminal,
                 rotate_styles: false,
                 rotation_interval_secs: 30,
+                max_fps: 60,
             },
             audio: AudioConfig {
                 device: None,
@@ -621,6 +628,8 @@ mode = "terminal"
 rotate_styles = false
 # Rotation interval in seconds
 rotation_interval_secs = 30
+# Maximum frames per second (reduces CPU usage; 60 is plenty for most displays)
+max_fps = 60
 
 [audio]
 # Audio device (null = default)

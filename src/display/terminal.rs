@@ -57,7 +57,7 @@ async fn run_app(stdout: &mut impl Write, config: Config) -> Result<()> {
 
     let mut last_frame = Instant::now();
     let mut style_timer = Instant::now();
-    let target_fps = Duration::from_secs_f64(1.0 / 60.0);
+    let target_fps = Duration::from_secs_f64(1.0 / config.display.max_fps.max(1) as f64);
 
     // Reusable pixel canvas
     let mut canvas = renderer::Canvas::new(0, 0);

@@ -1092,6 +1092,10 @@ pub async fn run(config: Config, ipc_rx: mpsc::Receiver<IpcCommand>) -> Result<(
 
 
 
+    // Frame rate limiter
+    let frame_interval = Duration::from_secs_f64(1.0 / config.display.max_fps.max(1) as f64);
+    let mut last_render = Instant::now() - frame_interval; // render immediately on first iteration
+
     // Style rotation timer
     let mut style_timer = Instant::now();
     let rotation_interval = Duration::from_secs(config.display.rotation_interval_secs);
@@ -1148,8 +1152,10 @@ pub async fn run(config: Config, ipc_rx: mpsc::Receiver<IpcCommand>) -> Result<(
         state.last_frame = Instant::now();
         state.update(dt);
 
-        // Render all surfaces from the main loop
-        if state.active {
+        // Render all surfaces from the main loop (frame-rate limited)
+        let since_last_render = last_render.elapsed();
+        if state.active && since_last_render >= frame_interval {
+            last_render = Instant::now();
             let surface_keys: Vec<_> = state.surfaces.keys().cloned().collect();
             for key in surface_keys {
                 if let Some(surface) = state.surfaces.get(&key) {
@@ -1388,11 +1394,11 @@ pub async fn run(config: Config, ipc_rx: mpsc::Receiver<IpcCommand>) -> Result<(
             .dispatch_pending(&mut state)
             .context("Wayland dispatch failed")?;
 
-        // Sleep — use short interval when active (audio playing) for responsive
-        // state updates, longer when idle to minimize CPU usage
+        // Sleep until next frame is due, or use longer idle interval
         let elapsed = frame_start.elapsed();
         let poll_interval = if state.active {
-            Duration::from_millis(4)
+            let time_to_next_frame = frame_interval.saturating_sub(last_render.elapsed());
+            time_to_next_frame.max(Duration::from_millis(1))
         } else {
             Duration::from_millis(50)
         };

@@ -54,11 +54,18 @@ impl Canvas {
     pub fn put_pixel(&mut self, x: usize, y: usize, r: u8, g: u8, b: u8, opacity: f32) {
         let idx = (y * self.width + x) * 4;
         if idx + 3 < self.data.len() {
-            let a = (opacity * 255.0) as u8;
-            self.data[idx] = (r as f32 * opacity) as u8;
-            self.data[idx + 1] = (g as f32 * opacity) as u8;
-            self.data[idx + 2] = (b as f32 * opacity) as u8;
-            self.data[idx + 3] = a;
+            if opacity >= 1.0 {
+                self.data[idx] = r;
+                self.data[idx + 1] = g;
+                self.data[idx + 2] = b;
+                self.data[idx + 3] = 255;
+            } else {
+                let a = (opacity * 255.0) as u8;
+                self.data[idx] = (r as f32 * opacity) as u8;
+                self.data[idx + 1] = (g as f32 * opacity) as u8;
+                self.data[idx + 2] = (b as f32 * opacity) as u8;
+                self.data[idx + 3] = a;
+            }
         }
     }
 
@@ -77,18 +84,15 @@ impl Canvas {
     /// `dest` must be at least `width * height * 4` bytes.
     /// Wayland wl_shm expects ARGB8888 in native byte order: [B, G, R, A] on little-endian.
     pub fn write_argb8888(&self, dest: &mut [u8]) {
-        let pixel_count = self.width * self.height;
-        for i in 0..pixel_count {
-            let si = i * 4;
-            let r = self.data[si];
-            let g = self.data[si + 1];
-            let b = self.data[si + 2];
-            let a = self.data[si + 3];
-            // ARGB8888 in little-endian memory: B G R A
-            dest[si] = b;
-            dest[si + 1] = g;
-            dest[si + 2] = r;
-            dest[si + 3] = a;
+        let byte_count = self.width * self.height * 4;
+        let src = &self.data[..byte_count];
+        let dst = &mut dest[..byte_count];
+        // Swap R and B channels: RGBA [R,G,B,A] -> ARGB8888 LE [B,G,R,A]
+        for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+            d[0] = s[2]; // B
+            d[1] = s[1]; // G
+            d[2] = s[0]; // R
+            d[3] = s[3]; // A
         }
     }
 }
