@@ -151,7 +151,14 @@ pub fn render_text(canvas: &mut Canvas, frame: &FrameData, params: &RenderParams
     };
 
     for (i, ch) in text.chars().enumerate() {
-        let base_x = (base_start_x as isize - scroll_offset + (i * (char_width + char_spacing)) as isize) as usize;
+        let base_x_signed = base_start_x as isize - scroll_offset + (i * (char_width + char_spacing)) as isize;
+
+        // Skip characters entirely off-screen to the left or right.
+        if base_x_signed + char_width as isize <= 0 || base_x_signed >= width as isize {
+            continue;
+        }
+
+        let base_x = base_x_signed.max(0) as usize;
 
         // Apply animation effects per character
         let (char_x, char_y, char_opacity) = match text_config.animation_style {
@@ -171,11 +178,6 @@ pub fn render_text(canvas: &mut Canvas, frame: &FrameData, params: &RenderParams
                 (base_x, y, params.opacity)
             }
         };
-
-        // Skip if character is outside visible area
-        if char_x >= width || char_x + char_width > width + char_width {
-            continue;
-        }
 
         let (r, g, b) = colors.get(i).copied().unwrap_or((255, 255, 255));
 

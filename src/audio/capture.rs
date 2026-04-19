@@ -13,14 +13,18 @@ use super::fft::FrequencyAnalyzer;
 use super::AudioData;
 
 pub struct AudioCapture {
-    // Keep the thread handle to ensure it stays alive
-    _capture_thread: thread::JoinHandle<()>,
+    capture_thread: Option<thread::JoinHandle<()>>,
     stop_flag: Arc<AtomicBool>,
 }
 
 impl Drop for AudioCapture {
     fn drop(&mut self) {
         self.stop_flag.store(true, Ordering::Relaxed);
+        // Join so the PulseAudio `Simple` object (owned by the thread) is not
+        // freed while the thread still holds a blocking `read()` into it.
+        if let Some(handle) = self.capture_thread.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -177,7 +181,7 @@ impl AudioCapture {
         });
 
         Ok(Self {
-            _capture_thread: capture_thread,
+            capture_thread: Some(capture_thread),
             stop_flag,
         })
     }
@@ -193,34 +197,33 @@ impl AudioCapture {
     ) {
         let mut analyzer = FrequencyAnalyzer::new(num_bars, sample_rate, smoothing, sensitivity);
 
-        // Buffer for audio samples (stereo f32)
         // Read enough samples for FFT processing (~46ms at 44100Hz)
-        let buffer_size = 2048 * 2; // stereo
-        let mut buffer = vec![0.0f32; buffer_size];
+        // Buffer holds raw PulseAudio bytes (F32LE, stereo); decoded per iteration
+        // into the mono scratch buffer below.
+        let frame_count = 2048; // per channel
+        let channels = 2;
+        let sample_bytes = std::mem::size_of::<f32>();
+        let mut byte_buffer = vec![0u8; frame_count * channels * sample_bytes];
+        let mut mono = vec![0.0f32; frame_count];
 
         loop {
             if stop_flag.load(Ordering::Relaxed) {
                 debug!("Stop flag set, ending capture loop");
                 break;
             }
-            // Read audio data from PulseAudio
-            let byte_slice = unsafe {
-                std::slice::from_raw_parts_mut(
-                    buffer.as_mut_ptr() as *mut u8,
-                    buffer.len() * std::mem::size_of::<f32>(),
-                )
-            };
 
-            if let Err(e) = pulse.read(byte_slice) {
+            if let Err(e) = pulse.read(&mut byte_buffer) {
                 warn!("PulseAudio read error: {:?}", e);
                 continue;
             }
 
-            // Convert stereo to mono
-            let mono: Vec<f32> = buffer
-                .chunks(2)
-                .map(|chunk| (chunk[0] + chunk[1]) / 2.0)
-                .collect();
+            // Decode stereo F32LE bytes to mono f32 (average left+right)
+            let stride = channels * sample_bytes; // bytes per stereo frame
+            for (i, frame) in byte_buffer.chunks_exact(stride).enumerate() {
+                let l = f32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]);
+                let r = f32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]]);
+                mono[i] = (l + r) * 0.5;
+            }
 
             // Process through FFT
             let audio_data = analyzer.process(&mono);

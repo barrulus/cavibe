@@ -20,6 +20,9 @@ pub struct Canvas {
     pub data: Vec<u8>,
     pub width: usize,
     pub height: usize,
+    /// Reusable scratch buffer for per-frame bar frequency layout.
+    /// Owned here so every render reuses the same allocation.
+    pub layout_scratch: Vec<f32>,
 }
 
 impl Canvas {
@@ -28,6 +31,7 @@ impl Canvas {
             data: vec![0u8; width * height * 4],
             width,
             height,
+            layout_scratch: Vec::new(),
         }
     }
 

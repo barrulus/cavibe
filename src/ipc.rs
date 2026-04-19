@@ -238,13 +238,13 @@ pub fn process_ipc_command(
                 _ => "auto".to_string(),
             };
             let status = format!(
-                "ok: style={} color={} visible={} opacity={} layer={} anchor={:?} margin={},{},{},{} size={} draggable={}",
+                "ok: style={} color={} visible={} opacity={} layer={} anchor={} margin={},{},{},{} size={} draggable={}",
                 visualizer.current_style_name(),
                 color_scheme.name(),
                 visible,
                 opacity,
                 config.wallpaper.layer.name(),
-                config.wallpaper.anchor,
+                config.wallpaper.anchor.name(),
                 mt, mr, mb, ml,
                 size_str,
                 config.wallpaper.draggable,
@@ -332,7 +332,7 @@ pub fn process_ipc_command(
             config.wallpaper.anchor = anchor;
             pending.surface_update = true;
             pending.save_config = true;
-            let _ = reply.send(format!("ok: {:?}", anchor).to_lowercase());
+            let _ = reply.send(format!("ok: {}", anchor.name()));
         }
         IpcCommand::MarginSet { top, right, bottom, left, reply } => {
             config.wallpaper.margin_top = top;
@@ -344,9 +344,8 @@ pub fn process_ipc_command(
             pending.save_config = true;
             let _ = reply.send(format!("ok: {},{},{},{}", top, right, bottom, left));
         }
-        IpcCommand::Resize { .. } => {
-            // Handled in wayland.rs main loop (needs surface dimensions for margin adjustment)
-            unreachable!("Resize should be intercepted in wayland.rs");
+        IpcCommand::Resize { reply, .. } => {
+            let _ = reply.send("err: not supported in this mode".to_string());
         }
         IpcCommand::DragToggle { reply } => {
             config.wallpaper.draggable = !config.wallpaper.draggable;

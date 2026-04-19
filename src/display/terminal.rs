@@ -57,7 +57,7 @@ async fn run_app(stdout: &mut impl Write, config: Config) -> Result<()> {
 
     let mut last_frame = Instant::now();
     let mut style_timer = Instant::now();
-    let target_fps = Duration::from_secs_f64(1.0 / config.display.max_fps.max(1) as f64);
+    let frame_interval = Duration::from_secs_f64(1.0 / config.display.max_fps.max(1) as f64);
 
     // Reusable pixel canvas
     let mut canvas = renderer::Canvas::new(0, 0);
@@ -66,10 +66,11 @@ async fn run_app(stdout: &mut impl Write, config: Config) -> Result<()> {
     let mut spectrogram_history: Vec<Vec<f32>> = Vec::new();
 
     loop {
+        let frame_start = Instant::now();
+
         // Calculate delta time
-        let now = Instant::now();
-        let dt = now.duration_since(last_frame).as_secs_f32();
-        last_frame = now;
+        let dt = frame_start.duration_since(last_frame).as_secs_f32();
+        last_frame = frame_start;
 
         // Auto-rotate styles if enabled
         if config.display.rotate_styles
@@ -147,8 +148,13 @@ async fn run_app(stdout: &mut impl Write, config: Config) -> Result<()> {
 
         stdout.flush()?;
 
+        // Sleep only for the time remaining in this frame, so render time doesn't
+        // push the next frame later than the target interval.
+        let elapsed = frame_start.elapsed();
+        let poll_timeout = frame_interval.saturating_sub(elapsed);
+
         // Handle input
-        if event::poll(target_fps)? {
+        if event::poll(poll_timeout)? {
             if let Event::Key(key) = event::read()? {
                 match key {
                     KeyEvent {

@@ -11,6 +11,7 @@ pub struct FrequencyAnalyzer {
     buffer: Vec<Complex<f32>>,
     window: Vec<f32>,
     previous_magnitudes: Vec<f32>,
+    half_magnitudes: Vec<f32>,
     sensitivity: f32,
 }
 
@@ -35,12 +36,14 @@ impl FrequencyAnalyzer {
             buffer: vec![Complex::new(0.0, 0.0); fft_size],
             window,
             previous_magnitudes: vec![0.0; num_bars],
+            half_magnitudes: vec![0.0; num_bars / 2],
             sensitivity,
         }
     }
 
     pub fn process(&mut self, samples: &[f32]) -> AudioData {
-        // Capture raw waveform before windowing (for oscilloscope display)
+        // Capture raw waveform before windowing (for oscilloscope display).
+        // This still allocates because waveform is owned by AudioData.
         let waveform: Vec<f32> = samples
             .iter()
             .take(self.fft_size)
@@ -61,50 +64,57 @@ impl FrequencyAnalyzer {
         let fft = self.planner.plan_fft_forward(self.fft_size);
         fft.process(&mut self.buffer);
 
-        // Calculate magnitudes and map to bars
-        let frequencies = self.calculate_bar_magnitudes();
+        // Calculate magnitudes into the reusable half_magnitudes buffer
+        self.calculate_bar_magnitudes();
 
-        // Apply smoothing
-        let smoothed: Vec<f32> = frequencies
-            .iter()
-            .zip(self.previous_magnitudes.iter())
-            .map(|(&new, &old)| old * self.smoothing + new * (1.0 - self.smoothing))
-            .collect();
+        // Smooth in-place into previous_magnitudes, and emit the result as a
+        // single allocation (AudioData owns this Vec).
+        let mut frequencies = vec![0.0f32; self.num_bars];
+        let half_bars = self.num_bars / 2;
+        for i in 0..half_bars {
+            // Mirror layout: bass on edges, treble in middle
+            let new_left = self.half_magnitudes[i];
+            let new_right = self.half_magnitudes[i];
 
-        self.previous_magnitudes = smoothed.clone();
+            let li = half_bars - 1 - i;
+            let ri = half_bars + i;
 
-        // Calculate overall metrics
-        let intensity = smoothed.iter().sum::<f32>() / smoothed.len() as f32;
+            let smoothed_l = self.previous_magnitudes[li] * self.smoothing + new_left * (1.0 - self.smoothing);
+            let smoothed_r = self.previous_magnitudes[ri] * self.smoothing + new_right * (1.0 - self.smoothing);
+
+            self.previous_magnitudes[li] = smoothed_l;
+            self.previous_magnitudes[ri] = smoothed_r;
+            frequencies[li] = smoothed_l;
+            frequencies[ri] = smoothed_r;
+        }
+
+        let intensity = frequencies.iter().sum::<f32>() / frequencies.len() as f32;
 
         AudioData {
-            frequencies: smoothed,
+            frequencies,
             intensity,
             waveform,
         }
     }
 
-    fn calculate_bar_magnitudes(&self) -> Vec<f32> {
-        // Use only positive frequencies (first half of FFT output)
+    /// Fill `self.half_magnitudes` from the current FFT buffer.
+    fn calculate_bar_magnitudes(&mut self) {
         let useful_bins = self.fft_size / 2;
 
-        // Logarithmic frequency scaling for better visualization
-        // Human hearing is logarithmic, so we want more bars for lower frequencies
-        let min_freq = 50.0; // Hz - start a bit higher for better bass response
-        let max_freq = 10000.0_f32.min(self.sample_rate / 2.0); // Hz - cap lower for more activity
+        // Logarithmic frequency scaling: human hearing is logarithmic
+        let min_freq = 50.0_f32;
+        let max_freq = 10000.0_f32.min(self.sample_rate / 2.0);
 
-        // Calculate half the bars, then mirror for symmetric display (like cava)
         let half_bars = self.num_bars / 2;
-        let mut half_magnitudes = vec![0.0; half_bars];
+        let denom = half_bars.max(1) as f32;
 
-        for (bar, magnitude_out) in half_magnitudes.iter_mut().enumerate() {
-            // Calculate frequency range for this bar (logarithmic scale)
-            let bar_start = (bar as f32) / (half_bars as f32);
-            let bar_end = ((bar + 1) as f32) / (half_bars as f32);
+        for bar in 0..half_bars {
+            let bar_start = bar as f32 / denom;
+            let bar_end = (bar + 1) as f32 / denom;
 
             let freq_start = min_freq * (max_freq / min_freq).powf(bar_start);
             let freq_end = min_freq * (max_freq / min_freq).powf(bar_end);
 
-            // Convert to bin indices
             let bin_start =
                 ((freq_start * self.fft_size as f32) / self.sample_rate).floor() as usize;
             let bin_end = ((freq_end * self.fft_size as f32) / self.sample_rate).ceil() as usize;
@@ -112,28 +122,12 @@ impl FrequencyAnalyzer {
             let bin_start = bin_start.min(useful_bins - 1);
             let bin_end = bin_end.min(useful_bins).max(bin_start + 1);
 
-            // Average magnitude across bins
             let mut sum = 0.0;
             for bin in bin_start..bin_end {
-                let magnitude = self.buffer[bin].norm();
-                sum += magnitude;
+                sum += self.buffer[bin].norm();
             }
-
             let avg = sum / (bin_end - bin_start) as f32;
-            // Apply sensitivity scaling (base scale + user sensitivity multiplier)
-            *magnitude_out = (avg * 0.02 * self.sensitivity).min(1.0);
+            self.half_magnitudes[bar] = (avg * 0.02 * self.sensitivity).min(1.0);
         }
-
-        // Mirror: bass on edges, treble in middle
-        // Layout: [bass...treble | treble...bass]
-        let mut bar_magnitudes = vec![0.0; self.num_bars];
-        for i in 0..half_bars {
-            // Left side: bass to treble (reversed so bass is on left edge)
-            bar_magnitudes[half_bars - 1 - i] = half_magnitudes[i];
-            // Right side: treble to bass (normal order so bass is on right edge)
-            bar_magnitudes[half_bars + i] = half_magnitudes[i];
-        }
-
-        bar_magnitudes
     }
 }

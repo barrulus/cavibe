@@ -25,21 +25,27 @@ pub fn style_count() -> usize {
 
 /// Dispatch to the correct style renderer.
 pub fn render_bars(canvas: &mut Canvas, frequencies: &[f32], params: &RenderParams) {
-    let layout = match compute_bar_layout(canvas.width, canvas.height, frequencies, params) {
-        Some(l) => l,
-        None => return,
-    };
+    let width = canvas.width;
+    let height = canvas.height;
 
-    match params.style {
-        1 => render_bars_mirrored(canvas, &layout, params),
-        2 => render_bars_wave(canvas, &layout, params),
-        3 => render_bars_dots(canvas, &layout, params),
-        4 => render_bars_blocks(canvas, &layout, params),
-        5 => render_bars_oscilloscope(canvas, &layout, params),
-        6 => render_bars_spectrogram(canvas, &layout, params),
-        7 => render_bars_radial(canvas, &layout, params),
-        _ => render_bars_classic(canvas, &layout, params),
+    // Take the scratch buffer out of Canvas so compute_bar_layout can borrow it
+    // mutably while Canvas stays available for pixel writes.
+    let mut scratch = std::mem::take(&mut canvas.layout_scratch);
+
+    if let Some(layout) = compute_bar_layout(width, height, frequencies, params, &mut scratch) {
+        match params.style {
+            1 => render_bars_mirrored(canvas, &layout, params),
+            2 => render_bars_wave(canvas, &layout, params),
+            3 => render_bars_dots(canvas, &layout, params),
+            4 => render_bars_blocks(canvas, &layout, params),
+            5 => render_bars_oscilloscope(canvas, &layout, params),
+            6 => render_bars_spectrogram(canvas, &layout, params),
+            7 => render_bars_radial(canvas, &layout, params),
+            _ => render_bars_classic(canvas, &layout, params),
+        }
     }
+
+    canvas.layout_scratch = scratch;
 }
 
 /// Style 0: Classic vertical bars from bottom

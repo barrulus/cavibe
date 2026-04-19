@@ -27,6 +27,12 @@ pub struct MonitorConfig {
     pub style: Option<String>, // Style name
     pub opacity: Option<f32>,
     pub audio_source: Option<String>, // PulseAudio sink name for this monitor
+    // Per-monitor position overrides (saved on drag release)
+    pub margin_top: Option<i32>,
+    pub margin_left: Option<i32>,
+    pub anchor: Option<WallpaperAnchor>,
+    pub width: Option<String>,
+    pub height: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -738,7 +744,9 @@ margin = 0
         if args.rotate {
             self.display.rotate_styles = true;
         }
-        self.display.rotation_interval_secs = args.rotate_interval;
+        if let Some(interval) = args.rotate_interval {
+            self.display.rotation_interval_secs = interval;
+        }
 
         // Audio settings
         if let Some(ref device) = args.audio_device {
@@ -753,11 +761,20 @@ margin = 0
         if let Some(smoothing) = args.smoothing {
             self.audio.smoothing = smoothing;
         }
-        self.audio.sensitivity = args.sensitivity;
+        if let Some(sensitivity) = args.sensitivity {
+            self.audio.sensitivity = sensitivity;
+        }
 
         // Visualizer settings
-        self.visualizer.bars = args.bars;
-        self.visualizer.color_scheme = args.colors.parse().unwrap_or(self.visualizer.color_scheme);
+        if let Some(bars) = args.bars {
+            self.visualizer.bars = bars;
+        }
+        if let Some(ref colors) = args.colors {
+            match colors.parse() {
+                Ok(scheme) => self.visualizer.color_scheme = scheme,
+                Err(_) => eprintln!("Warning: invalid --colors '{}'; keeping previous value", colors),
+            }
+        }
         if args.style.is_some() {
             self.visualizer.style = args.style.clone();
         }
@@ -812,10 +829,16 @@ margin = 0
             self.text.margin_horizontal = m;
         }
         if let Some(ref color) = args.title_color {
-            self.text.title_color = RgbColor::from_hex(color);
+            match RgbColor::from_hex(color) {
+                Some(c) => self.text.title_color = Some(c),
+                None => eprintln!("Warning: invalid --title-color '{}' (expected #RRGGBB); keeping previous value", color),
+            }
         }
         if let Some(ref color) = args.artist_color {
-            self.text.artist_color = RgbColor::from_hex(color);
+            match RgbColor::from_hex(color) {
+                Some(c) => self.text.artist_color = Some(c),
+                None => eprintln!("Warning: invalid --artist-color '{}' (expected #RRGGBB); keeping previous value", color),
+            }
         }
 
         // Wallpaper settings

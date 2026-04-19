@@ -39,12 +39,12 @@ pub struct Args {
 
     // === Visualizer settings ===
     /// Number of frequency bars
-    #[arg(short, long, default_value = "64")]
-    pub bars: usize,
+    #[arg(short, long)]
+    pub bars: Option<usize>,
 
     /// Color scheme: spectrum, rainbow, fire, ocean, monochrome
-    #[arg(long, default_value = "spectrum")]
-    pub colors: String,
+    #[arg(long)]
+    pub colors: Option<String>,
 
     /// Visualizer style: "classic bars", "mirrored bars", "wave", "dots", "blocks"
     #[arg(long)]
@@ -55,8 +55,8 @@ pub struct Args {
     pub rotate: bool,
 
     /// Rotation interval in seconds
-    #[arg(long, default_value = "30")]
-    pub rotate_interval: u64,
+    #[arg(long)]
+    pub rotate_interval: Option<u64>,
 
     /// Width of each bar in characters
     #[arg(long)]
@@ -96,8 +96,8 @@ pub struct Args {
     pub smoothing: Option<f32>,
 
     /// Audio sensitivity (0.1-10.0, default 1.0)
-    #[arg(short, long, default_value = "1.0")]
-    pub sensitivity: f32,
+    #[arg(short, long)]
+    pub sensitivity: Option<f32>,
 
     // === Text settings ===
     /// Show track title

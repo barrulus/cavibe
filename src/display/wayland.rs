@@ -242,6 +242,19 @@ impl WallpaperState {
         (None, None, None, None)
     }
 
+    /// Get per-monitor position overrides (margins) from config.
+    /// Returns (margin_top, margin_left) if the monitor has saved position data.
+    fn get_monitor_position_overrides(&self, output_name: &Option<String>) -> (Option<i32>, Option<i32>) {
+        if let Some(ref name) = output_name {
+            for monitor_cfg in &self.config.wallpaper.monitors {
+                if monitor_cfg.output == *name {
+                    return (monitor_cfg.margin_top, monitor_cfg.margin_left);
+                }
+            }
+        }
+        (None, None)
+    }
+
     /// Create a layer surface for a specific output
     fn create_surface_for_output(&mut self, qh: &QueueHandle<Self>, output: &wl_output::WlOutput) {
         // Skip if we already have a surface for this output
@@ -281,9 +294,10 @@ impl WallpaperState {
         let anchor = self.config.wallpaper.anchor.to_layer_shell_anchor();
         layer_surface.set_anchor(anchor);
 
-        // Apply margins
+        // Apply margins (per-monitor overrides take precedence)
         let (top, right, bottom, left) = self.config.wallpaper.effective_margins();
-        layer_surface.set_margin(top, right, bottom, left);
+        let (monitor_mt, monitor_ml) = self.get_monitor_position_overrides(&output_name);
+        layer_surface.set_margin(monitor_mt.unwrap_or(top), right, bottom, monitor_ml.unwrap_or(left));
 
         // Set size for non-fullscreen anchors.
         // Layer-shell requires explicit width when LEFT+RIGHT aren't both set,
@@ -315,6 +329,8 @@ impl WallpaperState {
         let (color_override, style_override, opacity_override, audio_source) = self.get_monitor_overrides(&output_name);
 
         let (mt, _, _, ml) = self.config.wallpaper.effective_margins();
+        // Per-monitor position overrides take precedence over global margins
+        let (monitor_mt, monitor_ml) = self.get_monitor_position_overrides(&output_name);
         let surface = OutputSurface {
             output_name,
             layer_surface,
@@ -331,8 +347,8 @@ impl WallpaperState {
             audio_source_key: audio_source,
             audio_data: Arc::new(AudioData::default()),
             spectrogram_history: Vec::new(),
-            margin_top: mt,
-            margin_left: ml,
+            margin_top: monitor_mt.unwrap_or(mt),
+            margin_left: monitor_ml.unwrap_or(ml),
             canvas: renderer::Canvas::new(0, 0),
         };
 
@@ -377,25 +393,33 @@ impl WallpaperState {
         if !self.visible {
             // Render a fully transparent frame
             if surface.pool.is_none() {
-                let pool = SlotPool::new(
-                    (surface.width * surface.height * 4) as usize,
-                    &self.shm,
-                )
-                .expect("Failed to create slot pool");
-                surface.pool = Some(pool);
+                match SlotPool::new((surface.width * surface.height * 4) as usize, &self.shm) {
+                    Ok(pool) => surface.pool = Some(pool),
+                    Err(e) => {
+                        tracing::warn!("Failed to create slot pool: {:?}; skipping frame", e);
+                        return;
+                    }
+                }
             }
             let pool = surface.pool.as_mut().unwrap();
-            let (buffer, canvas) = pool
-                .create_buffer(
-                    surface.width as i32,
-                    surface.height as i32,
-                    (surface.width * 4) as i32,
-                    wl_shm::Format::Argb8888,
-                )
-                .expect("Failed to create buffer");
+            let (buffer, canvas) = match pool.create_buffer(
+                surface.width as i32,
+                surface.height as i32,
+                (surface.width * 4) as i32,
+                wl_shm::Format::Argb8888,
+            ) {
+                Ok(bc) => bc,
+                Err(e) => {
+                    tracing::warn!("Failed to create buffer: {:?}; skipping frame", e);
+                    return;
+                }
+            };
             canvas.fill(0);
             let wl_surf = surface.layer_surface.wl_surface();
-            buffer.attach_to(wl_surf).expect("Failed to attach buffer");
+            if let Err(e) = buffer.attach_to(wl_surf) {
+                tracing::warn!("Failed to attach buffer: {:?}; skipping frame", e);
+                return;
+            }
             wl_surf.damage_buffer(0, 0, surface.width as i32, surface.height as i32);
             wl_surf.commit();
             return;
@@ -403,25 +427,30 @@ impl WallpaperState {
 
         // Ensure we have a pool
         if surface.pool.is_none() {
-            let pool = SlotPool::new(
-                (surface.width * surface.height * 4) as usize,
-                &self.shm,
-            )
-            .expect("Failed to create slot pool");
-            surface.pool = Some(pool);
+            match SlotPool::new((surface.width * surface.height * 4) as usize, &self.shm) {
+                Ok(pool) => surface.pool = Some(pool),
+                Err(e) => {
+                    tracing::warn!("Failed to create slot pool: {:?}; skipping frame", e);
+                    return;
+                }
+            }
         }
 
         let pool = surface.pool.as_mut().unwrap();
 
         // Get a buffer from the pool
-        let (buffer, canvas) = pool
-            .create_buffer(
-                surface.width as i32,
-                surface.height as i32,
-                (surface.width * 4) as i32,
-                wl_shm::Format::Argb8888,
-            )
-            .expect("Failed to create buffer");
+        let (buffer, canvas) = match pool.create_buffer(
+            surface.width as i32,
+            surface.height as i32,
+            (surface.width * 4) as i32,
+            wl_shm::Format::Argb8888,
+        ) {
+            Ok(bc) => bc,
+            Err(e) => {
+                tracing::warn!("Failed to create buffer: {:?}; skipping frame", e);
+                return;
+            }
+        };
 
         // Resolve per-surface overrides
         let color_scheme = surface.color_scheme_override.unwrap_or(self.color_scheme);
@@ -478,7 +507,10 @@ impl WallpaperState {
 
         // Attach and commit
         let wl_surf = surface.layer_surface.wl_surface();
-        buffer.attach_to(wl_surf).expect("Failed to attach buffer");
+        if let Err(e) = buffer.attach_to(wl_surf) {
+            tracing::warn!("Failed to attach buffer: {:?}; skipping frame", e);
+            return;
+        }
         wl_surf.damage_buffer(0, 0, surface.width as i32, surface.height as i32);
         wl_surf.commit();
     }
@@ -664,6 +696,7 @@ impl WallpaperState {
     /// Save only position/margin data to config (used on drag release).
     /// Unlike save_state_to_config, this does NOT write the `draggable` flag,
     /// so disabling drag persists correctly across restarts.
+    /// Saves per-monitor positions into [[wallpaper.monitors]] sections.
     fn save_position_to_config(&self) {
         let Some(path) = Config::default_path() else {
             return;
@@ -680,6 +713,7 @@ impl WallpaperState {
                         if !doc.contains_key("wallpaper") {
                             doc["wallpaper"] = toml_edit::table();
                         }
+                        // Save global position (used as default for monitors without overrides)
                         doc["wallpaper"]["anchor"] = toml_edit::value(self.config.wallpaper.anchor.name());
                         doc["wallpaper"]["margin"] = toml_edit::value(self.config.wallpaper.margin as i64);
                         doc["wallpaper"]["margin_top"] = toml_edit::value(self.config.wallpaper.margin_top as i64);
@@ -692,6 +726,50 @@ impl WallpaperState {
                         if let Some(ref h) = self.config.wallpaper.height {
                             doc["wallpaper"]["height"] = toml_edit::value(h.as_str());
                         }
+
+                        // Save per-monitor positions into [[wallpaper.monitors]]
+                        // Get or create the monitors array
+                        let monitors_array = if doc["wallpaper"]["monitors"].is_array_of_tables() {
+                            doc["wallpaper"]["monitors"].as_array_of_tables_mut().unwrap().clone()
+                        } else {
+                            toml_edit::ArrayOfTables::new()
+                        };
+
+                        let mut new_monitors = toml_edit::ArrayOfTables::new();
+
+                        // Preserve existing monitor entries, updating positions for known surfaces
+                        for existing in monitors_array.iter() {
+                            let mut entry = existing.clone();
+                            if let Some(output_name) = existing.get("output").and_then(|v| v.as_str()) {
+                                // Check if we have a surface for this monitor with updated position
+                                if let Some(surface) = self.surfaces.values().find(|s| {
+                                    s.output_name.as_deref() == Some(output_name)
+                                }) {
+                                    entry["margin_top"] = toml_edit::value(surface.margin_top as i64);
+                                    entry["margin_left"] = toml_edit::value(surface.margin_left as i64);
+                                }
+                            }
+                            new_monitors.push(entry);
+                        }
+
+                        // Add entries for surfaces that don't have a monitors section yet
+                        for surface in self.surfaces.values() {
+                            if let Some(ref name) = surface.output_name {
+                                let already_exists = new_monitors.iter().any(|m| {
+                                    m.get("output").and_then(|v| v.as_str()) == Some(name)
+                                });
+                                if !already_exists {
+                                    let mut entry = toml_edit::Table::new();
+                                    entry["output"] = toml_edit::value(name.as_str());
+                                    entry["margin_top"] = toml_edit::value(surface.margin_top as i64);
+                                    entry["margin_left"] = toml_edit::value(surface.margin_left as i64);
+                                    new_monitors.push(entry);
+                                }
+                            }
+                        }
+
+                        doc["wallpaper"]["monitors"] = toml_edit::Item::ArrayOfTables(new_monitors);
+
                         let _ = std::fs::write(&path, doc.to_string());
                     }
                     Err(e) => {
@@ -796,8 +874,22 @@ impl OutputHandler for WallpaperState {
 }
 
 impl LayerShellHandler for WallpaperState {
-    fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _layer: &LayerSurface) {
-        self.running = false;
+    fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, layer: &LayerSurface) {
+        // Find which output owns this layer surface
+        let id_to_remove = self.surfaces.iter()
+            .find(|(_, s)| &s.layer_surface == layer)
+            .map(|(id, _)| id.clone());
+
+        if let Some(id) = id_to_remove {
+            if let Some(surface) = self.surfaces.remove(&id) {
+                info!("Layer surface closed for output {:?}", surface.output_name);
+            }
+        }
+
+        // Only stop when the last surface is gone
+        if self.surfaces.is_empty() {
+            self.running = false;
+        }
     }
 
     fn configure(
@@ -836,6 +928,7 @@ impl LayerShellHandler for WallpaperState {
             (w, h)
         };
 
+        let size_changed = surface.width != width || surface.height != height;
         surface.width = width;
         surface.height = height;
 
@@ -844,6 +937,10 @@ impl LayerShellHandler for WallpaperState {
 
         // Recreate the pool for new size
         surface.pool = None;
+        // Drop stale spectrogram rows (old rows have different widths)
+        if size_changed {
+            surface.spectrogram_history.clear();
+        }
         surface.configured = true;
 
         // Initial draw so the surface isn't blank before the main loop catches up
@@ -1323,6 +1420,9 @@ pub async fn run(config: Config, ipc_rx: mpsc::Receiver<IpcCommand>) -> Result<(
                     surface.explicit_size = None;
                 }
 
+                // Force pool reallocation so we don't render into an undersized
+                // pool before the configure event arrives with the new size.
+                surface.pool = None;
                 surface.layer_surface.commit();
             }
         }
